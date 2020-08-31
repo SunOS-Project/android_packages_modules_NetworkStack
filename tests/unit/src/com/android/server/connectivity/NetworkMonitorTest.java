@@ -660,7 +660,8 @@ public class NetworkMonitorTest {
 
     @Test
     public void testOnlyWifiTransport() {
-        final WrappedNetworkMonitor wnm = makeCellMeteredNetworkMonitor();
+        final WrappedNetworkMonitor wnm = makeMonitor(CELL_METERED_CAPABILITIES);
+        assertFalse(wnm.onlyWifiTransport());
         final NetworkCapabilities nc = new NetworkCapabilities()
                 .addTransportType(TRANSPORT_WIFI)
                 .addTransportType(TRANSPORT_VPN);
@@ -926,6 +927,18 @@ public class NetworkMonitorTest {
         return info;
     }
 
+    private void setupNoSimCardNeighborMcc() throws Exception {
+        // Enable using neighbor resource by camping mcc feature.
+        doReturn(true).when(mResources).getBoolean(R.bool.config_no_sim_card_uses_neighbor_mcc);
+        final List<CellInfo> cellList = new ArrayList<CellInfo>();
+        final int testMcc = 460;
+        cellList.add(makeTestCellInfoGsm(Integer.toString(testMcc)));
+        doReturn(cellList).when(mTelephony).getAllCellInfo();
+        final Configuration config = mResources.getConfiguration();
+        config.mcc = testMcc;
+        doReturn(mMccContext).when(mContext).createConfigurationContext(eq(config));
+    }
+
     @Test
     public void testMakeFallbackUrls() throws Exception {
         final WrappedNetworkMonitor wnm = makeCellNotMeteredNetworkMonitor();
@@ -949,21 +962,28 @@ public class NetworkMonitorTest {
         assertEquals("http://testUrl1.com", urls[0].toString());
         assertEquals("http://testUrl2.com", urls[1].toString());
 
-        // Value is expected to be replaced by location resource.
-        doReturn(true).when(mResources).getBoolean(R.bool.config_no_sim_card_uses_neighbor_mcc);
-
-        final List<CellInfo> cellList = new ArrayList<CellInfo>();
-        final int testMcc = 460;
-        cellList.add(makeTestCellInfoGsm(Integer.toString(testMcc)));
-        doReturn(cellList).when(mTelephony).getAllCellInfo();
-        final Configuration config = mResources.getConfiguration();
-        config.mcc = testMcc;
-        doReturn(mMccContext).when(mContext).createConfigurationContext(eq(config));
+        // Even though the using neighbor resource by camping mcc feature is enabled, the
+        // customized context has been assigned and won't change. So calling
+        // makeCaptivePortalFallbackUrls() still gets the original value.
+        setupNoSimCardNeighborMcc();
         doReturn(new String[] {"http://testUrl3.com"}).when(mMccResource)
                 .getStringArray(R.array.config_captive_portal_fallback_urls);
         urls = wnm.makeCaptivePortalFallbackUrls();
+        assertEquals(urls.length, 2);
+        assertEquals("http://testUrl1.com", urls[0].toString());
+        assertEquals("http://testUrl2.com", urls[1].toString());
+    }
+
+    @Test
+    public void testMakeFallbackUrlsWithCustomizedContext() throws Exception {
+        // Value is expected to be replaced by location resource.
+        setupNoSimCardNeighborMcc();
+        doReturn(new String[] {"http://testUrl.com"}).when(mMccResource)
+                .getStringArray(R.array.config_captive_portal_fallback_urls);
+        final WrappedNetworkMonitor wnm = makeCellNotMeteredNetworkMonitor();
+        final URL[] urls = wnm.makeCaptivePortalFallbackUrls();
         assertEquals(urls.length, 1);
-        assertEquals("http://testUrl3.com", urls[0].toString());
+        assertEquals("http://testUrl.com", urls[0].toString());
     }
 
     private static CellIdentityGsm makeCellIdentityGsm(int lac, int cid, int arfcn, int bsic,
@@ -1120,7 +1140,8 @@ public class NetworkMonitorTest {
 
         // Second check should be triggered automatically after the reevaluate delay, and uses the
         // URL chosen by mRandom
-        // This test is appropriate to cover reevaluate behavior as long as the timeout is short
+        // Ensure that the reevaluate delay is not changed to a large value, otherwise this test
+        // would block for too long and a different test strategy should be used.
         assertTrue(INITIAL_REEVALUATE_DELAY_MS < 2000);
         verify(mOtherFallbackConnection, timeout(INITIAL_REEVALUATE_DELAY_MS + HANDLER_TIMEOUT_MS))
                 .getResponseCode();
@@ -1644,6 +1665,25 @@ public class NetworkMonitorTest {
     }
 
     @Test
+    public void testIsDataStall_EvaluationDnsAndTcp() throws Exception {
+        setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS | DATA_STALL_EVALUATION_TYPE_TCP);
+        setupTcpDataStall();
+        final WrappedNetworkMonitor nm = makeMonitor(CELL_METERED_CAPABILITIES);
+        nm.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        makeDnsTimeoutEvent(nm, DEFAULT_DNS_TIMEOUT_THRESHOLD);
+        assertTrue(nm.isDataStall());
+        verify(mCallbacks).notifyDataStallSuspected(
+                matchDnsAndTcpDataStallParcelable(DEFAULT_DNS_TIMEOUT_THRESHOLD));
+
+        when(mTst.getLatestReceivedCount()).thenReturn(5);
+        // Trigger a tcp event immediately.
+        setTcpPollingInterval(0);
+        nm.sendTcpPollingEvent();
+        HandlerUtilsKt.waitForIdle(nm.getHandler(), HANDLER_TIMEOUT_MS);
+        assertFalse(nm.isDataStall());
+    }
+
+    @Test
     public void testIsDataStall_DisableTcp() {
         // Disable tcp detection with only DNS detect. keep the tcp signal but set to no DNS signal.
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS);
@@ -1879,18 +1919,16 @@ public class NetworkMonitorTest {
 
     @Test
     public void testDataStall_StallTcpSuspectedAndSendMetricsOnCell() throws Exception {
-        testDataStall_StallTcpSuspectedAndSendMetrics(NetworkCapabilities.TRANSPORT_CELLULAR,
-                CELL_METERED_CAPABILITIES);
+        testDataStall_StallTcpSuspectedAndSendMetrics(CELL_METERED_CAPABILITIES);
     }
 
     @Test
     public void testDataStall_StallTcpSuspectedAndSendMetricsOnWifi() throws Exception {
-        testDataStall_StallTcpSuspectedAndSendMetrics(NetworkCapabilities.TRANSPORT_WIFI,
-                WIFI_NOT_METERED_CAPABILITIES);
+        testDataStall_StallTcpSuspectedAndSendMetrics(WIFI_NOT_METERED_CAPABILITIES);
     }
 
-    private void testDataStall_StallTcpSuspectedAndSendMetrics(int transport,
-            NetworkCapabilities nc) throws Exception {
+    private void testDataStall_StallTcpSuspectedAndSendMetrics(NetworkCapabilities nc)
+            throws Exception {
         assumeTrue(ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q));
         setupTcpDataStall();
         // NM suspects data stall from TCP signal and sends data stall metrics.
@@ -1900,7 +1938,10 @@ public class NetworkMonitorTest {
         // Trigger a tcp event immediately.
         setTcpPollingInterval(0);
         nm.sendTcpPollingEvent();
-        verifySendDataStallDetectionStats(nm, DATA_STALL_EVALUATION_TYPE_TCP, transport);
+        // Allow only one transport type in the context of this test for simplification.
+        final int[] transports = nc.getTransportTypes();
+        assertEquals(1, transports.length);
+        verifySendDataStallDetectionStats(nm, DATA_STALL_EVALUATION_TYPE_TCP, transports[0]);
     }
 
     private WrappedNetworkMonitor prepareNetworkMonitorForVerifyDataStall(NetworkCapabilities nc)
@@ -1909,20 +1950,15 @@ public class NetworkMonitorTest {
         // evaluation will only start from validated state.
         setStatus(mHttpsConnection, 204);
         final WrappedNetworkMonitor nm;
-        final int[] transports = nc.getTransportTypes();
-        // Though multiple transport types are allowed, use the first transport type for
-        // simplification.
-        switch (transports[0]) {
-            case NetworkCapabilities.TRANSPORT_CELLULAR:
-                nm = makeCellMeteredNetworkMonitor();
-                break;
-            case NetworkCapabilities.TRANSPORT_WIFI:
-                nm = makeWifiNotMeteredNetworkMonitor();
-                setupTestWifiInfo();
-                break;
-            default:
-                nm = null;
-                fail("Undefined transport type");
+        // Allow only one transport type in the context of this test for simplification.
+        if (nc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            nm = makeCellMeteredNetworkMonitor();
+        } else if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            nm = makeWifiNotMeteredNetworkMonitor();
+            setupTestWifiInfo();
+        } else {
+            nm = null;
+            fail("Undefined transport type");
         }
         nm.notifyNetworkConnected(TEST_LINK_PROPERTIES, nc);
         verifyNetworkTested(NETWORK_VALIDATION_RESULT_VALID,
@@ -2686,13 +2722,20 @@ public class NetworkMonitorTest {
                 && Objects.equals(p.redirectUrl, redirectUrl));
     }
 
+    private DataStallReportParcelable matchDnsAndTcpDataStallParcelable(final int timeoutCount) {
+        return argThat(p ->
+                (p.detectionMethod & ConstantsShim.DETECTION_METHOD_DNS_EVENTS) != 0
+                && (p.detectionMethod & ConstantsShim.DETECTION_METHOD_TCP_METRICS) != 0
+                && p.dnsConsecutiveTimeouts == timeoutCount);
+    }
+
     private DataStallReportParcelable matchDnsDataStallParcelable(final int timeoutCount) {
-        return argThat(p -> p.detectionMethod == ConstantsShim.DETECTION_METHOD_DNS_EVENTS
+        return argThat(p -> (p.detectionMethod & ConstantsShim.DETECTION_METHOD_DNS_EVENTS) != 0
                 && p.dnsConsecutiveTimeouts == timeoutCount);
     }
 
     private DataStallReportParcelable matchTcpDataStallParcelable() {
-        return argThat(p -> p.detectionMethod == ConstantsShim.DETECTION_METHOD_TCP_METRICS);
+        return argThat(p -> (p.detectionMethod & ConstantsShim.DETECTION_METHOD_TCP_METRICS) != 0);
     }
 }
 
