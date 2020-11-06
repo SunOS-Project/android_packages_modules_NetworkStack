@@ -1,5 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
+/*
  * Copyright (C) 2020 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,10 +12,11 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
-  -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          package="com.android.networkstack"
-          android:sharedUserId="android.uid.networkstack"
-          android:versionCode="310000000"
-          android:versionName="S-next">
-</manifest>
+ */
+
+package android.net.networkstack.aidl.quirks;
+
+parcelable IPv6ProvisioningLossQuirkParcelable {
+    int detectionCount;
+    long quirkExpiry;
+}
