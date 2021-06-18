@@ -65,6 +65,9 @@ java_defaults {
         "androidx.annotation_annotation",
         "networkstack-client",
     ],
+    static_libs : [
+        "modules-utils-build_system"
+    ],
     apex_available: [
         "com.android.tethering",
         "//apex_available:platform",  // For InProcessNetworkStack and InProcessTethering
@@ -228,9 +231,11 @@ android_library {
     static_libs: ["NetworkStackApiStableShims"],
     manifest: "AndroidManifestBase.xml",
     visibility: [
+        "//frameworks/base/packages/Connectivity/tests/integration",
         "//frameworks/base/tests/net/integration",
         "//packages/modules/Connectivity/Tethering/tests/integration",
         "//packages/modules/Connectivity/tests/cts/net",
+        "//packages/modules/Connectivity/tests/integration",
         "//packages/modules/NetworkStack/tests/unit",
         "//packages/modules/NetworkStack/tests/integration",
     ],
@@ -278,7 +283,10 @@ android_app {
     // The permission configuration *must* be included to ensure security of the device
     // The InProcessNetworkStack goes together with the PlatformCaptivePortalLogin, which replaces
     // the default CaptivePortalLogin.
-    required: ["PlatformNetworkPermissionConfig", "PlatformCaptivePortalLogin"],
+    required: [
+        "PlatformNetworkPermissionConfig",
+        "PlatformCaptivePortalLogin",
+    ],
 }
 
 // Pre-merge the AndroidManifest for NetworkStackNext, so that its manifest can be merged on top
@@ -297,7 +305,10 @@ android_app {
     certificate: "networkstack",
     manifest: "AndroidManifest_Next.xml",
     // The permission configuration *must* be included to ensure security of the device
-    required: ["NetworkPermissionConfig"],
+    required: [
+        "NetworkPermissionConfig",
+        "privapp_whitelist_com.android.networkstack",
+    ],
 }
 
 // Updatable network stack for finalized API
@@ -308,7 +319,10 @@ android_app {
     certificate: "networkstack",
     manifest: "AndroidManifest.xml",
     // The permission configuration *must* be included to ensure security of the device
-    required: ["NetworkPermissionConfig"],
+    required: [
+        "NetworkPermissionConfig",
+        "privapp_whitelist_com.android.networkstack",
+    ],
     updatable: true,
 }
 
@@ -385,7 +399,10 @@ android_app {
     certificate: "networkstack",
     manifest: ":NetworkStackTestAndroidManifest",
     // The permission configuration *must* be included to ensure security of the device
-    required: ["NetworkPermissionConfig"],
+    required: [
+        "NetworkPermissionConfig",
+        "privapp_whitelist_com.android.networkstack",
+    ],
 }
 
 // When adding or modifying protos, the jarjar rules and possibly proguard rules need
