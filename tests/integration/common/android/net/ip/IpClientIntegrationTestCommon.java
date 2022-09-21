@@ -144,7 +144,6 @@ import android.net.networkstack.aidl.ip.ReachabilityLossReason;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
-import android.net.util.NetworkStackUtils;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -180,15 +179,16 @@ import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
 import com.android.networkstack.apishim.ConstantsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.arp.ArpPacket;
+import com.android.networkstack.ipmemorystore.IpMemoryStoreService;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.networkstack.packets.NeighborSolicitation;
+import com.android.networkstack.util.NetworkStackUtils;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
-import com.android.server.connectivity.ipmemorystore.IpMemoryStoreService;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
@@ -1143,6 +1143,8 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotEquals(0, lp.getDnsServers().size());
         assertEquals(addresses.size(), lp.getAddresses().size());
         assertTrue(lp.getAddresses().containsAll(addresses));
+        assertTrue(hasRouteTo(lp, IPV4_TEST_SUBNET_PREFIX)); // IPv4 directly-connected route
+        assertTrue(hasRouteTo(lp, IPV4_ANY_ADDRESS_PREFIX)); // IPv4 default route
         return lp;
     }
 
@@ -1588,7 +1590,7 @@ public abstract class IpClientIntegrationTestCommon {
             assertDhcpRequestForReacquire(packet);
             packetList.add(packet);
         }
-        assertTrue(packetList.size() > 1);
+        assertEquals(1, packetList.size());
     }
 
     private LinkProperties prepareDhcpReacquireTest() throws Exception {
@@ -1597,6 +1599,7 @@ public abstract class IpClientIntegrationTestCommon {
         mNetworkAgentThread.start();
 
         final long currentTime = System.currentTimeMillis();
+        setFeatureEnabled(NetworkStackUtils.DHCP_SLOW_RETRANSMISSION_VERSION, true);
         performDhcpHandshake(true /* isSuccessLease */,
                 TEST_LEASE_DURATION_S, true /* isDhcpLeaseCacheEnabled */,
                 false /* isDhcpRapidCommitEnabled */, TEST_DEFAULT_MTU,
@@ -1632,21 +1635,20 @@ public abstract class IpClientIntegrationTestCommon {
                 request.senderIp /* target IP */, SERVER_ADDR /* sender IP */);
         HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
 
-        // Verify the multiple unicast DHCPREQUESTs to be received in the renew state per current
-        // packet retransmission schedule.
+        // Verify there should be only one unicast DHCPREQUESTs to be received per RFC2131.
         assertReceivedDhcpRequestPacketCount();
 
         return rebindAlarm;
     }
 
-    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind/kick alarms")
+    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind alarms")
     public void testDhcpRenew() throws Exception {
         final LinkProperties lp = prepareDhcpReacquireTest();
         final InOrder inOrder = inOrder(mAlarm);
         runDhcpRenewTest(mDependencies.mDhcpClient.getHandler(), lp, inOrder);
     }
 
-    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind/kick alarms")
+    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind alarms")
     public void testDhcpRebind() throws Exception {
         final LinkProperties lp = prepareDhcpReacquireTest();
         final Handler handler = mDependencies.mDhcpClient.getHandler();
@@ -1655,9 +1657,8 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Trigger rebind alarm and forece DHCP client enter RebindingState. DHCP client sends
         // broadcast DHCPREQUEST to nearby servers, then check how many DHCPREQUEST packets are
-        // retransmitted within PACKET_TIMEOUT_MS(5s), there should be more than one DHCPREQUEST
-        // captured per current retransmission schedule(t=0, t=1, t=3, t=7, t=16 and allowing for
-        // 10% jitter).
+        // retransmitted within PACKET_TIMEOUT_MS(5s), there should be only one DHCPREQUEST
+        // captured per RFC2131.
         handler.post(() -> rebindAlarm.onAlarm());
         assertReceivedDhcpRequestPacketCount();
     }
@@ -3173,10 +3174,15 @@ public abstract class IpClientIntegrationTestCommon {
         }
         final int after = getNumOpenFds();
 
-        // Check that the number of open fds is the same as before.
-        // If this exact match becomes flaky, we could add some tolerance here (e.g., allow 2-3
-        // extra fds), since it's likely that any leak would at least leak one FD per loop.
-        assertEquals("Fd leak after " + iterations + " iterations: ", before, after);
+        // Check that the number of open fds is the same as before, within some tolerance (e.g.,
+        // garbage collection or other cleanups might have caused an fd to be closed). This
+        // shouldn't make leak detection much less reliable, since it's likely that any leak would
+        // at least leak one FD per loop.
+        final int tolerance = 4;
+        assertTrue(
+                "FD leak detected after " + iterations + " iterations: expected "
+                        + before + " +/- " + tolerance + " fds, found " + after,
+                Math.abs(after - before) <= tolerance);
     }
 
     // TODO: delete when DhcpOption is @JavaOnlyImmutable.
