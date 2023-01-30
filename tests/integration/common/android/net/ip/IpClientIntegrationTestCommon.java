@@ -88,6 +88,7 @@ import static org.mockito.ArgumentMatchers.longThat;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
@@ -612,8 +613,15 @@ public abstract class IpClientIntegrationTestCommon {
                 mIsNetlinkEventParseEnabled /* default value */);
 
         setUpTapInterface();
-        mCb = mock(IIpClientCallbacks.class);
+        // It turns out that Router Solicitation will also be sent out even after the tap interface
+        // is brought up, however, we want to wait for RS which is sent due to IPv6 stack is enabled
+        // in the test code. The early RS might bring kind of race, for example, the IPv6 stack has
+        // not been enabled when test code sees the RS, then kernel will not process RA even if we
+        // replies immediately after receiving RS. Always waiting for the first RS show up after
+        // interface is brought up helps prevent the race.
+        waitForRouterSolicitation();
 
+        mCb = mock(IIpClientCallbacks.class);
         if (useNetworkStackSignature()) {
             setUpMocks();
             setUpIpClient();
@@ -2843,7 +2851,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(lp.getDnsServers().contains(InetAddress.getByName(dnsServer)));
         assertTrue(lp.getDnsServers().contains(SERVER_ADDR));
 
-        reset(mCb);
+        clearInvocations(mCb);
     }
 
     private void doDualStackProvisioning(boolean shouldDisableAcceptRa) throws Exception {
@@ -4081,8 +4089,31 @@ public abstract class IpClientIntegrationTestCommon {
         assertFalse(lp.hasGlobalIpv6Address());
         assertEquals(3, lp.getLinkAddresses().size()); // IPv6 privacy, stable privacy, link-local
         for (LinkAddress la : lp.getLinkAddresses()) {
-            final Inet6Address address = (Inet6Address) la.getAddress();
             assertFalse(NetworkStackUtils.isIPv6GUA(la));
         }
+    }
+
+    @Test @SignatureRequiredTest(reason = "requires mNetd to delete IPv6 GUAs")
+    public void testOnIpv6AddressRemoved() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .build();
+        startIpClientProvisioning(config);
+
+        LinkProperties lp = doIpv6OnlyProvisioning();
+        assertNotNull(lp);
+        assertEquals(3, lp.getLinkAddresses().size()); // IPv6 privacy, stable privacy, link-local
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            final Inet6Address address = (Inet6Address) la.getAddress();
+            if (address.isLinkLocalAddress()) continue;
+            // Remove IPv6 GUAs from interface.
+            mNetd.interfaceDelAddress(mIfaceName, address.getHostAddress(), la.getPrefixLength());
+        }
+
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
+        lp = captor.getValue();
+        assertFalse(lp.hasGlobalIpv6Address());
+        assertEquals(1, lp.getLinkAddresses().size()); // only link-local
     }
 }
