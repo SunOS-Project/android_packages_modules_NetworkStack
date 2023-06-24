@@ -3806,9 +3806,12 @@ public abstract class IpClientIntegrationTestCommon {
             final Inet6Address dstIp, final Inet6Address targetIp) throws Exception {
         NeighborSolicitation ns;
         while ((ns = getNextNeighborSolicitation()) != null) {
-            // Filter out the NSes used for duplicate address detetction, the target address
-            // is the global IPv6 address inside these NSes.
-            if (ns.nsHdr.target.isLinkLocalAddress()) break;
+            // Filter out the multicast NSes used for duplicate address detetction, the target
+            // address is the global IPv6 address inside these NSes, and multicast NSes sent from
+            // device's GUAs to force first-hop router to update the neighbor cache entry.
+            if (ns.ipv6Hdr.srcIp.isLinkLocalAddress() && ns.nsHdr.target.isLinkLocalAddress()) {
+                break;
+            }
         }
         assertNotNull("No unicast Neighbor solicitation received on interface within timeout", ns);
         assertUnicastNeighborSolicitation(ns, dstMac, dstIp, targetIp);
@@ -3819,9 +3822,10 @@ public abstract class IpClientIntegrationTestCommon {
         NeighborSolicitation ns;
         final List<NeighborSolicitation> nsList = new ArrayList<NeighborSolicitation>();
         while ((ns = getNextNeighborSolicitation()) != null) {
-            // Filter out the NSes used for duplicate address detetction, the target address
-            // is the global IPv6 address inside these NSes.
-            if (ns.nsHdr.target.isLinkLocalAddress()) {
+            // Filter out the multicast NSes used for duplicate address detetction, the target
+            // address is the global IPv6 address inside these NSes, and multicast NSes sent from
+            // device's GUAs to force first-hop router to update the neighbor cache entry.
+            if (ns.ipv6Hdr.srcIp.isLinkLocalAddress() && ns.nsHdr.target.isLinkLocalAddress()) {
                 nsList.add(ns);
             }
         }
@@ -4170,8 +4174,14 @@ public abstract class IpClientIntegrationTestCommon {
         teardownTapInterface();
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
         verify(mCb, never()).onLinkPropertiesChange(argThat(newLp ->
+                // Ideally there should be only one route(fe80::/64 -> :: iface mtu 0) in the
+                // LinkProperties, however, the multicast route(ff00::/8 -> :: iface mtu 0) may
+                // appear on some old platforms where the kernel is still notifying the userspace
+                // the multicast route. Therefore, we cannot assert that size of routes in the
+                // LinkProperties is more than one, but other properties such as DNS or IPv6
+                // default route or global IPv6 address should never appear in the IPv6 link-local
+                // only mode.
                 newLp.getDnsServers().size() != 0
-                        || newLp.getRoutes().size() > 1
                         || newLp.hasIpv6DefaultRoute()
                         || newLp.hasGlobalIpv6Address()
         ));
@@ -4448,23 +4458,25 @@ public abstract class IpClientIntegrationTestCommon {
                 .build();
         startIpClientProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(any());
-        inOrder.verify(mCb).setMaxDtimMultiplier(
+        // IPv6 DTIM grace period doesn't apply to IPv6 link-local only mode and the multiplier
+        // has been initialized to DTIM_MULTIPLIER_RESET before starting provisioning, therefore,
+        // the multiplier should not be updated neither.
+        verify(mCb, never()).setMaxDtimMultiplier(
                 IpClient.DEFAULT_BEFORE_IPV6_PROV_MAX_DTIM_MULTIPLIER);
-        inOrder.verify(mCb, timeout(TEST_TIMEOUT_MS)).setMaxDtimMultiplier(
-                DTIM_MULTIPLIER_RESET);
+        verify(mCb, never()).setMaxDtimMultiplier(DTIM_MULTIPLIER_RESET);
     }
 
     @Test
     public void testMaxDtimMultiplier_IPv4OnlyNetwork() throws Exception {
-        final InOrder inOrder = inOrder(mCb);
         performDhcpHandshake(true /* isSuccessLease */, TEST_LEASE_DURATION_S,
                 true /* isDhcpLeaseCacheEnabled */, false /* shouldReplyRapidCommitAck */,
                 TEST_DEFAULT_MTU, false /* isDhcpIpConflictDetectEnabled */);
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
-        inOrder.verify(mCb).setMaxDtimMultiplier(
-                IpClient.DEFAULT_BEFORE_IPV6_PROV_MAX_DTIM_MULTIPLIER);
-        inOrder.verify(mCb, timeout(TEST_TIMEOUT_MS)).setMaxDtimMultiplier(
+        verify(mCb, timeout(TEST_TIMEOUT_MS).times(1)).setMaxDtimMultiplier(
                 IpClient.DEFAULT_IPV4_ONLY_NETWORK_MAX_DTIM_MULTIPLIER);
+        // IPv6 DTIM grace period doesn't apply to IPv4-only networks.
+        verify(mCb, never()).setMaxDtimMultiplier(
+                IpClient.DEFAULT_BEFORE_IPV6_PROV_MAX_DTIM_MULTIPLIER);
     }
 
     private void runDualStackNetworkDtimMultiplierSetting(final InOrder inOrder) throws Exception {
