@@ -63,6 +63,7 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.HexDump;
 import com.android.internal.util.IndentingPrintWriter;
+import com.android.internal.util.TokenBucket;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.ConnectivityUtils;
 import com.android.net.module.util.InterfaceParams;
@@ -122,6 +123,7 @@ public class ApfFilter {
         PARSE_ERROR,    // Received RA could not be parsed
         ZERO_LIFETIME,  // Received RA had 0 lifetime
         UPDATE_NEW_RA,  // APF program updated for new RA
+        IGNORED,        // Received RA would be dropped by APF bytecode
         UPDATE_EXPIRY   // APF program updated for expiry
     }
 
@@ -255,6 +257,10 @@ public class ApfFilter {
                 case UPDATE_NEW_RA:
                     mProgramUpdates++;
                     return;
+                case IGNORED:
+                    // Do nothing. Ignored RAs aren't particularly interesting as they mark the RAs
+                    // that would normally be dropped when the program is active.
+                    return;
             }
         }
 
@@ -365,6 +371,7 @@ public class ApfFilter {
     private final IpClientCallbacksWrapper mIpClientCallback;
     private final InterfaceParams mInterfaceParams;
     private final IpConnectivityLog mMetricsLog;
+    private final TokenBucket mTokenBucket;
 
     @VisibleForTesting
     public byte[] mHardwareAddress;
@@ -434,6 +441,15 @@ public class ApfFilter {
         mEthTypeBlackList = filterEthTypeBlackList(config.ethTypeBlackList);
 
         mMetricsLog = log;
+
+        // TokenBucket for rate limiting filter installation. APF filtering relies on the filter
+        // always being up-to-date and APF bytecode being in sync with userspace. The TokenBucket
+        // merely prevents illconfigured / abusive networks from impacting the system, so it does
+        // not need to be very restrictive.
+        // The TokenBucket starts with its full capacity of 20 tokens (= 20 filter updates). A new
+        // token is generated every 3 seconds limiting the filter update rate to at most once every
+        // 3 seconds.
+        mTokenBucket = new TokenBucket(3_000 /* deltaMs */, 20 /* capacity */, 20 /* tokens */);
 
         // TODO: ApfFilter should not generate programs until IpClient sends provisioning success.
         maybeStartFilter();
@@ -536,7 +552,7 @@ public class ApfFilter {
     private static class PacketSection {
         public enum Type {
             MATCH,     // A field that should be matched (e.g., the router IP address).
-            LIFETIME,  // A lifetime. Not matched, and generally counts toward minimum RA lifetime.
+            LIFETIME,  // A lifetime. Not matched, and counts toward minimum RA lifetime if >= min.
         }
 
         /** The type of section. */
@@ -545,22 +561,35 @@ public class ApfFilter {
         public final int start;
         /** Length of this section in bytes. */
         public final int length;
-        /** If this is a lifetime, the ICMP option that defined it. 0 for router lifetime. */
-        public final int option;
         /** If this is a lifetime, the lifetime value. */
         public final long lifetime;
+        /** If this is a lifetime, the value below which the lifetime is ignored */
+        public final int min;
 
-        PacketSection(int start, int length, Type type, int option, long lifetime) {
+        PacketSection(int start, int length, Type type, long lifetime, int min) {
             this.start = start;
+
+            if (type == Type.LIFETIME && length != 2 && length != 4) {
+                throw new IllegalArgumentException("LIFETIME section length must be 2 or 4 bytes");
+            }
             this.length = length;
             this.type = type;
-            this.option = option;
+
+            if (type == Type.MATCH && (lifetime != 0 || min != 0)) {
+                throw new IllegalArgumentException("lifetime, min must be 0 for MATCH sections");
+            }
             this.lifetime = lifetime;
+
+            // It has already been asserted that min is 0 for MATCH sections.
+            if (min < 0) {
+                throw new IllegalArgumentException("min must be >= 0 for LIFETIME sections");
+            }
+            this.min = min;
         }
 
         public String toString() {
             if (type == Type.LIFETIME) {
-                return String.format("%s: (%d, %d) %d %d", type, start, length, option, lifetime);
+                return String.format("%s: (%d, %d) %d %d", type, start, length, lifetime, min);
             } else {
                 return String.format("%s: (%d, %d)", type, start, length);
             }
@@ -744,18 +773,15 @@ public class ApfFilter {
             if (lastIdx >= 0) {  // there had to be a previous section
                 PacketSection prev = mPacketSections.get(lastIdx);
                 if (prev.type == PacketSection.Type.MATCH) {  // of type match
-                    if (prev.option == 0 && prev.lifetime == 0) {  // technically guaranteed
-                        if (prev.start + prev.length == from) {  // ending where we start
-                            from -= prev.length;
-                            length += prev.length;
-                            mPacketSections.remove(lastIdx);
-                        }
+                    if (prev.start + prev.length == from) {  // ending where we start
+                        from -= prev.length;
+                        length += prev.length;
+                        mPacketSections.remove(lastIdx);
                     }
                 }
             }
 
-            mPacketSections.add(
-                    new PacketSection(from, length, PacketSection.Type.MATCH, 0, 0));
+            mPacketSections.add(new PacketSection(from, length, PacketSection.Type.MATCH, 0, 0));
             mPacket.position(from + length);
         }
 
@@ -778,41 +804,28 @@ public class ApfFilter {
         /**
          * Add a packet section that represents a lifetime, starting from the current position.
          * @param length the length of the section in bytes
-         * @param optionType the RA option containing this lifetime, or 0 for router lifetime
          * @param lifetime the lifetime
+         * @param min the minimum acceptable lifetime
          */
-        private void addLifetimeSection(int length, int optionType, long lifetime) {
+        private void addLifetimeSection(int length, long lifetime, int min) {
             mPacketSections.add(
                     new PacketSection(mPacket.position(), length, PacketSection.Type.LIFETIME,
-                            optionType, lifetime));
+                            lifetime, min));
             mPacket.position(mPacket.position() + length);
         }
 
         /**
          * Adds packet sections for an RA option with a 4-byte lifetime 4 bytes into the option
-         * @param optionType the RA option that is being added
          * @param optionLength the length of the option in bytes
+         * @param min the minimum acceptable lifetime
          */
-        private long add4ByteLifetimeOption(int optionType, int optionLength) {
+        private long add4ByteLifetimeOption(int optionLength, int min) {
             addMatchSection(ICMP6_4_BYTE_LIFETIME_OFFSET);
             final long lifetime = getUint32(mPacket, mPacket.position());
-            addLifetimeSection(ICMP6_4_BYTE_LIFETIME_LEN, optionType, lifetime);
+            addLifetimeSection(ICMP6_4_BYTE_LIFETIME_LEN, lifetime, min);
             addMatchSection(optionLength - ICMP6_4_BYTE_LIFETIME_OFFSET
                     - ICMP6_4_BYTE_LIFETIME_LEN);
             return lifetime;
-        }
-
-        // http://b/66928272 http://b/65056012
-        // DnsServerRepository ignores RDNSS servers with lifetimes that are too low. Ignore these
-        // lifetimes for the purpose of filter lifetime calculations.
-        private boolean shouldIgnoreLifetime(int optionType, long lifetime) {
-            return optionType == ICMP6_RDNSS_OPTION_TYPE
-                    && lifetime != 0 && lifetime < mMinRdnssLifetimeSec;
-        }
-
-        private boolean isRelevantLifetime(PacketSection section) {
-            return section.type == PacketSection.Type.LIFETIME
-                    && !shouldIgnoreLifetime(section.option, section.lifetime);
         }
 
         // Note that this parses RA and may throw InvalidRaException (from
@@ -854,7 +867,7 @@ public class ApfFilter {
             // Parse router lifetime
             addMatchUntil(ICMP6_RA_ROUTER_LIFETIME_OFFSET);
             final long routerLifetime = getUint16(mPacket, ICMP6_RA_ROUTER_LIFETIME_OFFSET);
-            addLifetimeSection(ICMP6_RA_ROUTER_LIFETIME_LEN, 0, routerLifetime);
+            addLifetimeSection(ICMP6_RA_ROUTER_LIFETIME_LEN, routerLifetime, mAcceptRaMinLft);
             builder.updateRouterLifetime(routerLifetime);
 
             // Add remaining fields (reachable time and retransmission timer) to match section.
@@ -878,13 +891,15 @@ public class ApfFilter {
                         addMatchSection(ICMP6_PREFIX_OPTION_VALID_LIFETIME_OFFSET);
                         lifetime = getUint32(mPacket, mPacket.position());
                         addLifetimeSection(ICMP6_PREFIX_OPTION_VALID_LIFETIME_LEN,
-                                ICMP6_PREFIX_OPTION_TYPE, lifetime);
+                                lifetime, mAcceptRaMinLft);
                         builder.updatePrefixValidLifetime(lifetime);
 
                         // Parse preferred lifetime
                         lifetime = getUint32(mPacket, mPacket.position());
+                        // The PIO preferred lifetime is not affected by accept_ra_min_lft and
+                        // therefore does not have a minimum.
                         addLifetimeSection(ICMP6_PREFIX_OPTION_PREFERRED_LIFETIME_LEN,
-                                ICMP6_PREFIX_OPTION_TYPE, lifetime);
+                                lifetime, 0 /* min lifetime */);
                         builder.updatePrefixPreferredLifetime(lifetime);
 
                         addMatchSection(4);       // Reserved bytes
@@ -894,12 +909,12 @@ public class ApfFilter {
                     // are processed with the same specialized add4ByteLifetimeOption:
                     case ICMP6_RDNSS_OPTION_TYPE:
                         mRdnssOptionOffsets.add(position);
-                        lifetime = add4ByteLifetimeOption(optionType, optionLength);
+                        lifetime = add4ByteLifetimeOption(optionLength, mMinRdnssLifetimeSec);
                         builder.updateRdnssLifetime(lifetime);
                         break;
                     case ICMP6_ROUTE_INFO_OPTION_TYPE:
                         mRioOptionOffsets.add(position);
-                        lifetime = add4ByteLifetimeOption(optionType, optionLength);
+                        lifetime = add4ByteLifetimeOption(optionLength, mAcceptRaMinLft);
                         builder.updateRouteInfoLifetime(lifetime);
                         break;
                     case ICMP6_SOURCE_LL_ADDRESS_OPTION_TYPE:
@@ -923,10 +938,16 @@ public class ApfFilter {
             mMetricsLog.log(builder.build());
         }
 
+        public enum MatchType {
+            NO_MATCH, // the RAs do not match
+            MATCH_PASS, // the RAS match, and the APF program would pass.
+            MATCH_DROP, // the RAs match, but the APF program would drop.
+        }
+
         // Considering only the MATCH sections, does {@code packet} match this RA?
-        boolean matches(Ra newRa) {
+        MatchType matches(Ra newRa) {
             // Does their size match?
-            if (newRa.mPacket.capacity() != mPacket.capacity()) return false;
+            if (newRa.mPacket.capacity() != mPacket.capacity()) return MatchType.NO_MATCH;
 
             // Check if all MATCH sections are byte-identical.
             final byte[] newPacket = newRa.mPacket.array();
@@ -934,10 +955,94 @@ public class ApfFilter {
             for (PacketSection section : mPacketSections) {
                 if (section.type != PacketSection.Type.MATCH) continue;
                 for (int i = section.start; i < (section.start + section.length); i++) {
-                    if (newPacket[i] != oldPacket[i]) return false;
+                    if (newPacket[i] != oldPacket[i]) return MatchType.NO_MATCH;
                 }
             }
-            return true;
+
+            // Apply APF lifetime matching to LIFETIME sections and decide whether a packet should
+            // be processed (MATCH_PASS) or ignored (MATCH_DROP). This logic is needed to
+            // consistently process / ignore packets no matter the current state of the APF program.
+            // Note that userspace has no control (or knowledge) over when the APF program is
+            // running.
+            for (PacketSection section : mPacketSections) {
+                if (section.type != PacketSection.Type.LIFETIME) continue;
+
+                // the lifetime of the new RA.
+                long lft = 0;
+                switch (section.length) {
+                    // section.length is guaranteed to be 2 or 4.
+                    case 2: lft = getUint16(newRa.mPacket, section.start); break;
+                    case 4: lft = getUint32(newRa.mPacket, section.start); break;
+                }
+
+                // WARNING: keep this in sync with Ra#generateFilterLocked()!
+                if (section.lifetime == 0) {
+                    // Case 1) old lft == 0
+                    if (section.min > 0) {
+                        // a) in the presence of a min value.
+                        // if lft >= min -> PASS
+                        // gen.addJumpIfR0GreaterThan(section.min - 1, nextFilterLabel);
+                        if (lft >= section.min) return MatchType.MATCH_PASS;
+                    } else {
+                        // b) if min is 0 / there is no min value.
+                        // if lft > 0 -> PASS
+                        // gen.addJumpIfR0GreaterThan(0, nextFilterLabel);
+                        if (lft > 0) return MatchType.MATCH_PASS;
+                    }
+                } else if (section.min == 0) {
+                    // Case 2b) section is not affected by any minimum.
+                    //
+                    // if lft < (oldLft + 2) // 3 -> PASS
+                    // if lft > oldLft            -> PASS
+                    // gen.addJumpIfR0LessThan((int) ((section.lifetime + 2) / 3),
+                    //        nextFilterLabel);
+                    if (lft < (section.lifetime + 2) / 3) return MatchType.MATCH_PASS;
+                    // gen.addJumpIfR0GreaterThan((int) section.lifetime, nextFilterLabel);
+                    if (lft > section.lifetime) return MatchType.MATCH_PASS;
+                } else if (section.lifetime < section.min) {
+                    // Case 2a) 0 < old lft < min
+                    //
+                    // if lft == 0   -> PASS
+                    // if lft >= min -> PASS
+                    // gen.addJumpIfR0Equals(0, nextFilterLabel);
+                    if (lft == 0) return MatchType.MATCH_PASS;
+                    // gen.addJumpIfR0GreaterThan(section.min - 1, nextFilterLabel);
+                    if (lft >= section.min) return MatchType.MATCH_PASS;
+                } else if (section.lifetime <= 3 * section.min) {
+                    // Case 3a) min <= old lft <= 3 * min
+                    // Note that:
+                    // "(old lft + 2) / 3 <= min" is equivalent to "old lft <= 3 * min"
+                    //
+                    // Essentially, in this range there is no "renumbering support", as the
+                    // renumbering constant of 1/3 * old lft is smaller than the minimum
+                    // lifetime accepted by the kernel / userspace.
+                    //
+                    // if lft == 0     -> PASS
+                    // if lft > oldLft -> PASS
+                    // gen.addJumpIfR0Equals(0, nextFilterLabel);
+                    if (lft == 0) return MatchType.MATCH_PASS;
+                    // gen.addJumpIfR0GreaterThan((int) section.lifetime, nextFilterLabel);
+                    if (lft > section.lifetime) return MatchType.MATCH_PASS;
+                } else {
+                    // Case 4a) otherwise
+                    //
+                    // if lft == 0                  -> PASS
+                    // if lft < min                 -> CONTINUE
+                    // if lft < (oldLft + 2) // 3   -> PASS
+                    // if lft > oldLft              -> PASS
+                    // gen.addJumpIfR0Equals(0, nextFilterLabel);
+                    if (lft == 0) return MatchType.MATCH_PASS;
+                    // gen.addJumpIfR0LessThan(section.min, continueLabel);
+                    if (lft < section.min) continue;
+                    // gen.addJumpIfR0LessThan((int) ((section.lifetime + 2) / 3),
+                    //         nextFilterLabel);
+                    if (lft < (section.lifetime + 2) / 3) return MatchType.MATCH_PASS;
+                    // gen.addJumpIfR0GreaterThan((int) section.lifetime, nextFilterLabel);
+                    if (lft > section.lifetime) return MatchType.MATCH_PASS;
+                }
+            }
+
+            return MatchType.MATCH_DROP;
         }
 
         // What is the minimum of all lifetimes within {@code packet} in seconds?
@@ -949,9 +1054,15 @@ public class ApfFilter {
             // Clamp minLifetime at INT_MAX.
             int minLifetime = Integer.MAX_VALUE;
             for (PacketSection section : mPacketSections) {
-                if (isRelevantLifetime(section)) {
-                    minLifetime = (int) Math.min(minLifetime, section.lifetime);
+                if (section.type != PacketSection.Type.LIFETIME) {
+                    continue;
                 }
+                // Ignore lifetimes below section.min and always ignore 0 lifetimes.
+                if (section.lifetime < Math.max(section.min, 1)) {
+                    continue;
+                }
+
+                minLifetime = (int) Math.min(minLifetime, section.lifetime);
             }
             return minLifetime;
         }
@@ -1004,19 +1115,72 @@ public class ApfFilter {
                             Arrays.copyOfRange(mPacket.array(), section.start,
                                     section.start + section.length),
                             nextFilterLabel);
-                }
-
-                // Generate code to test the lifetimes haven't gone down too far.
-                // The packet is accepted if any non-ignored lifetime is lower than filterLifetime.
-                if (isRelevantLifetime(section)) {
+                } else {
                     switch (section.length) {
-                        case 4: gen.addLoad32(Register.R0, section.start); break;
+                        // length asserted to be either 2 or 4 on PacketSection construction
                         case 2: gen.addLoad16(Register.R0, section.start); break;
-                        default:
-                            throw new IllegalStateException(
-                                    "bogus lifetime size " + section.length);
+                        case 4: gen.addLoad32(Register.R0, section.start); break;
                     }
-                    gen.addJumpIfR0LessThan(filterLifetime(), nextFilterLabel);
+
+                    // WARNING: keep this in sync with matches()!
+                    // For more information on lifetime comparisons in the APF bytecode, see
+                    // go/apf-ra-filter.
+                    if (section.lifetime == 0) {
+                        // Case 1) old lft == 0
+                        if (section.min > 0) {
+                            // a) in the presence of a min value.
+                            // if lft >= min -> PASS
+                            gen.addJumpIfR0GreaterThan(section.min - 1, nextFilterLabel);
+                        } else {
+                            // b) if min is 0 / there is no min value.
+                            // if lft > 0 -> PASS
+                            gen.addJumpIfR0GreaterThan(0, nextFilterLabel);
+                        }
+                    } else if (section.min == 0) {
+                        // Case 2b) section is not affected by any minimum.
+                        //
+                        // if lft < (oldLft + 2) // 3 -> PASS
+                        // if lft > oldLft            -> PASS
+                        gen.addJumpIfR0LessThan((int) ((section.lifetime + 2) / 3),
+                                nextFilterLabel);
+                        gen.addJumpIfR0GreaterThan((int) section.lifetime, nextFilterLabel);
+                    } else if (section.lifetime < section.min) {
+                        // Case 2a) 0 < old lft < min
+                        //
+                        // if lft == 0   -> PASS
+                        // if lft >= min -> PASS
+                        gen.addJumpIfR0Equals(0, nextFilterLabel);
+                        gen.addJumpIfR0GreaterThan(section.min - 1, nextFilterLabel);
+                    } else if (section.lifetime <= 3 * section.min) {
+                        // Case 3a) min <= old lft <= 3 * min
+                        // Note that:
+                        // "(old lft + 2) / 3 <= min" is equivalent to "old lft <= 3 * min"
+                        //
+                        // Essentially, in this range there is no "renumbering support", as the
+                        // renumbering constant of 1/3 * old lft is smaller than the minimum
+                        // lifetime accepted by the kernel / userspace.
+                        //
+                        // if lft == 0     -> PASS
+                        // if lft > oldLft -> PASS
+                        gen.addJumpIfR0Equals(0, nextFilterLabel);
+                        gen.addJumpIfR0GreaterThan((int) section.lifetime, nextFilterLabel);
+                    } else {
+                        final String continueLabel = "Continue" + getUniqueNumberLocked();
+                        // Case 4a) otherwise
+                        //
+                        // if lft == 0                  -> PASS
+                        // if lft < min                 -> CONTINUE
+                        // if lft < (oldLft + 2) // 3   -> PASS
+                        // if lft > oldLft              -> PASS
+                        gen.addJumpIfR0Equals(0, nextFilterLabel);
+                        gen.addJumpIfR0LessThan(section.min, continueLabel);
+                        gen.addJumpIfR0LessThan((int) ((section.lifetime + 2) / 3),
+                                nextFilterLabel);
+                        gen.addJumpIfR0GreaterThan((int) section.lifetime, nextFilterLabel);
+
+                        // CONTINUE
+                        gen.defineLabel(continueLabel);
+                    }
                 }
             }
             maybeSetupCounter(gen, Counter.DROPPED_RA);
@@ -1252,11 +1416,6 @@ public class ApfFilter {
     @GuardedBy("this")
     private final List<String[]> mMdnsAllowList = new ArrayList<>();
 
-    // There is always some marginal benefit to updating the installed APF program when an RA is
-    // seen because we can extend the program's lifetime slightly, but there is some cost to
-    // updating the program, so don't bother unless the program is going to expire soon. This
-    // constant defines "soon" in seconds.
-    private static final long MAX_PROGRAM_LIFETIME_WORTH_REFRESHING = 30;
     // We don't want to filter an RA for it's whole lifetime as it'll be expired by the time we ever
     // see a refresh.  Using half the lifetime might be a good idea except for the fact that
     // packets may be dropped, so let's use 6.
@@ -1919,14 +2078,6 @@ public class ApfFilter {
         mMetricsLog.log(ev.build());
     }
 
-    /**
-     * Returns {@code true} if a new program should be installed because the current one dies soon.
-     */
-    private boolean shouldInstallnewProgram() {
-        long expiry = mLastTimeInstalledProgram + mLastInstalledProgramMinLifetime;
-        return expiry < currentTimeSeconds() + MAX_PROGRAM_LIFETIME_WORTH_REFRESHING;
-    }
-
     private void hexDump(String msg, byte[] packet, int length) {
         log(msg + HexDump.toHexString(packet, 0, length, false /* lowercase */));
     }
@@ -1961,10 +2112,13 @@ public class ApfFilter {
         }
         // Have we seen this RA before?
         for (int i = 0; i < mRas.size(); i++) {
-            Ra oldRa = mRas.get(i);
-            if (oldRa.matches(ra)) {
+            final Ra oldRa = mRas.get(i);
+            final Ra.MatchType result = oldRa.matches(ra);
+            if (result == Ra.MatchType.MATCH_PASS) {
+                // Only update RA seenCount (or anything related to the RA for a MATCH_PASS, so
+                // behavior is independent of APF program state.
                 ra.seenCount += oldRa.seenCount;
-                if (VDBG) log("matched RA " + ra);
+                log("Updating RA from " + oldRa + " to " + ra);
 
                 // Keep mRas in LRU order so as to prioritize generating filters for recently seen
                 // RAs. LRU prioritizes this because RA filters are generated in order from mRas
@@ -1976,12 +2130,17 @@ public class ApfFilter {
                 mRas.remove(i);
                 mRas.add(0, ra);
 
-                // If the current program doesn't expire for a while, don't update.
-                if (shouldInstallnewProgram()) {
+                // Rate limit program installation
+                if (mTokenBucket.get()) {
                     installNewProgramLocked();
-                    return ProcessRaResult.UPDATE_EXPIRY;
+                } else {
+                    Log.wtf(TAG, "Failed to install prog for tracked RA, too many updates. " + ra);
                 }
+                // TODO: clean up ProcessRaResults and update metrics collection.
                 return ProcessRaResult.MATCH;
+            } else if (result == Ra.MatchType.MATCH_DROP) {
+                log("Ignoring RA " + ra + " which matches " + oldRa);
+                return ProcessRaResult.IGNORED;
             }
         }
         purgeExpiredRasLocked();
@@ -1989,13 +2148,15 @@ public class ApfFilter {
             // Remove the last (i.e. oldest) RA.
             mRas.remove(mRas.size() - 1);
         }
-        // Ignore 0 lifetime RAs.
-        if (ra.isExpired()) {
-            return ProcessRaResult.ZERO_LIFETIME;
-        }
         log("Adding " + ra);
         mRas.add(0, ra);
-        installNewProgramLocked();
+        // Rate limit program installation
+        if (mTokenBucket.get()) {
+            installNewProgramLocked();
+        } else {
+            Log.wtf(TAG, "Failed to install prog for new RA, too many updates. " + ra);
+        }
+        // TODO: clean up ProcessRaResults and update metrics collection.
         return ProcessRaResult.UPDATE_NEW_RA;
     }
 
