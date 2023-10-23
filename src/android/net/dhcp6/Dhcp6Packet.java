@@ -34,6 +34,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.OptionalInt;
 
 /**
  * Defines basic data and operations needed to build and use packets for the
@@ -76,6 +77,11 @@ public class Dhcp6Packet {
     protected final byte[] mServerDuid;
 
     /**
+     * DHCPv6 Optional Type: Option Request Option.
+     */
+    public static final byte DHCP6_OPTION_REQUEST_OPTION = 6;
+
+    /**
      * DHCPv6 Optional Type: Elapsed time.
      * This time is expressed in hundredths of a second.
      */
@@ -112,6 +118,12 @@ public class Dhcp6Packet {
     protected final byte[] mIaPd;
     @NonNull
     protected PrefixDelegation mPrefixDelegation;
+
+    /**
+     * DHCPv6 Optional Type: SOL_MAX_RT.
+     */
+    public static final byte DHCP6_SOL_MAX_RT = 82;
+    private OptionalInt mSolMaxRt;
 
     /**
      * The transaction identifier used in this particular DHCPv6 negotiation
@@ -159,6 +171,13 @@ public class Dhcp6Packet {
      */
     public byte[] getServerDuid() {
         return mServerDuid;
+    }
+
+    /**
+     * Returns the SOL_MAX_RT option value.
+     */
+    public OptionalInt getSolMaxRtValue() {
+        return mSolMaxRt;
     }
 
     /**
@@ -257,6 +276,7 @@ public class Dhcp6Packet {
         short statusCode = STATUS_SUCCESS;
         String statusMsg = null;
         boolean rapidCommit = false;
+        int solMaxRt = 0;
 
         packet.order(ByteOrder.BIG_ENDIAN);
 
@@ -315,6 +335,10 @@ public class Dhcp6Packet {
                         statusCode = packet.getShort();
                         statusMsg = readAsciiString(packet, expectedLen - 2, false /* isNullOk */);
                         break;
+                    case DHCP6_SOL_MAX_RT:
+                        expectedLen = 4;
+                        solMaxRt = packet.getInt();
+                        break;
                     default:
                         expectedLen = optionLen;
                         // BufferUnderflowException will be thrown if option is truncated.
@@ -372,6 +396,10 @@ public class Dhcp6Packet {
         newPacket.mStatusCode = statusCode;
         newPacket.mStatusMsg = statusMsg;
         newPacket.mRapidCommit = rapidCommit;
+        newPacket.mSolMaxRt =
+                (solMaxRt >= 60 && solMaxRt <= 86400)
+                        ? OptionalInt.of(solMaxRt)
+                        : OptionalInt.empty();
 
         return newPacket;
     }
@@ -425,7 +453,9 @@ public class Dhcp6Packet {
             Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
             return false;
         }
-        if (t1 > t2) {
+
+        // Generally, t1 must be smaller or equal to t2 (except when t2 is 0).
+        if (t2 != 0 && t1 > t2) {
             Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
             return false;
         }
@@ -441,8 +471,10 @@ public class Dhcp6Packet {
                     + " greater than valid lifetime " + valid);
             return false;
         }
-        if (preferred < t2) {
-            Log.e(TAG, "preferred lifetime " + preferred + " is samller than T2 " + t2);
+
+        // If t2 is 0, ignore it.
+        if (t2 != 0 && preferred < t2) {
+            Log.e(TAG, "preferred lifetime " + preferred + " is smaller than T2 " + t2);
             return false;
         }
         return true;

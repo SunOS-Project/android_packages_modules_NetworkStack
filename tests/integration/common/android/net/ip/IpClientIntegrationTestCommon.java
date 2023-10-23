@@ -52,6 +52,7 @@ import static android.system.OsConstants.IFA_F_TEMPORARY;
 import static android.system.OsConstants.IPPROTO_ICMPV6;
 import static android.system.OsConstants.IPPROTO_IPV6;
 import static android.system.OsConstants.IPPROTO_UDP;
+
 import static com.android.net.module.util.Inet4AddressUtils.getBroadcastAddress;
 import static com.android.net.module.util.Inet4AddressUtils.getPrefixMaskAsInet4Address;
 import static com.android.net.module.util.NetworkStackConstants.ALL_DHCP_RELAY_AGENTS_AND_SERVERS;
@@ -80,7 +81,9 @@ import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK
 import static com.android.testutils.MiscAsserts.assertThrows;
 import static com.android.testutils.ParcelUtils.parcelingRoundTrip;
 import static com.android.testutils.TestPermissionUtil.runAsShell;
+
 import static junit.framework.Assert.fail;
+
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -526,9 +529,13 @@ public abstract class IpClientIntegrationTestCommon {
         }
 
         @Override
-        public boolean isFeatureEnabled(final Context context, final String name,
-                final boolean defaultEnabled) {
-            return IpClientIntegrationTestCommon.this.isFeatureEnabled(name, defaultEnabled);
+        public boolean isFeatureEnabled(final Context context, final String name) {
+            return IpClientIntegrationTestCommon.this.isFeatureEnabled(name);
+        }
+
+        @Override
+        public boolean isFeatureNotChickenedOut(final Context context, final String name) {
+            return IpClientIntegrationTestCommon.this.isFeatureNotChickenedOut(name);
         }
 
         @Override
@@ -547,9 +554,13 @@ public abstract class IpClientIntegrationTestCommon {
                 NetworkStackIpMemoryStore ipMemoryStore, IpProvisioningMetrics metrics) {
             return new DhcpClient.Dependencies(ipMemoryStore, metrics) {
                 @Override
-                public boolean isFeatureEnabled(final Context context, final String name,
-                        final boolean defaultEnabled) {
-                    return Dependencies.this.isFeatureEnabled(context, name, defaultEnabled);
+                public boolean isFeatureEnabled(final Context context, final String name) {
+                    return Dependencies.this.isFeatureEnabled(context, name);
+                }
+
+                @Override
+                public boolean isFeatureNotChickenedOut(final Context context, final String name) {
+                    return Dependencies.this.isFeatureNotChickenedOut(context, name);
                 }
 
                 @Override
@@ -590,9 +601,12 @@ public abstract class IpClientIntegrationTestCommon {
                     return new IpNeighborMonitor(h, log, cb);
                 }
 
-                public boolean isFeatureEnabled(final Context context, final String name,
-                        boolean defaultEnabled) {
-                    return Dependencies.this.isFeatureEnabled(context, name, defaultEnabled);
+                public boolean isFeatureEnabled(final Context context, final String name) {
+                    return Dependencies.this.isFeatureEnabled(context, name);
+                }
+
+                public boolean isFeatureNotChickenedOut(final Context context, final String name) {
+                    return Dependencies.this.isFeatureNotChickenedOut(context, name);
                 }
 
                 public IpReachabilityMonitorMetrics getIpReachabilityMonitorMetrics() {
@@ -626,7 +640,9 @@ public abstract class IpClientIntegrationTestCommon {
 
     protected abstract void setFeatureEnabled(String name, boolean enabled);
 
-    protected abstract boolean isFeatureEnabled(String name, boolean defaultEnabled);
+    protected abstract boolean isFeatureEnabled(String name);
+
+    protected abstract boolean isFeatureNotChickenedOut(String name);
 
     protected abstract boolean useNetworkStackSignature();
 
@@ -671,7 +687,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void setFeatureChickenedOut(String name, boolean chickenedOut) {
-        setDeviceConfigProperty(name, chickenedOut ? "1" : "0");
+        setDeviceConfigProperty(name, chickenedOut ? "-1" : "0");
     }
 
     protected void setDhcpFeatures(final boolean isDhcpLeaseCacheEnabled,
@@ -3252,7 +3268,7 @@ public abstract class IpClientIntegrationTestCommon {
         // Wait for RS after IPv6 stack has been restarted and reply with a normal RA to verify
         // that device gains the IPv6 provisioning without default route and off-link DNS server.
         sendBasicRouterAdvertisement(true /* waitForRs */);
-        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
+        verify(mCb, timeout(TEST_TIMEOUT_MS).atLeastOnce()).onLinkPropertiesChange(argThat(
                 x -> x.hasGlobalIpv6Address()
                         // IPv4, IPv6 link local, privacy and stable privacy
                         && x.getLinkAddresses().size() == 4
@@ -3875,7 +3891,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION,
                 true /* isGratuitousNaEnabled */);
-        assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION, false));
+        assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION));
         startIpClientProvisioning(config);
 
         doIpv6OnlyProvisioning();
@@ -3909,7 +3925,7 @@ public abstract class IpClientIntegrationTestCommon {
                 false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
         if (isGratuitousArpNaRoamingEnabled) {
             setFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION, true);
-            assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION, false));
+            assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION));
         }
         startIpClientProvisioning(prov.build());
     }
@@ -4599,7 +4615,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION,
                 true /* isUnsolicitedNsEnabled */);
-        assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION, false));
+        assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION));
         startIpClientProvisioning(config);
 
         doIpv6OnlyProvisioning();

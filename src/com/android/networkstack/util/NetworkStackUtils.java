@@ -282,6 +282,11 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_FORCE_DISABLE =
             "ipclient_ignore_low_ra_lifetime_force_disable";
+    /**
+     * Kill switch flag to disable new apf ra filter.
+     */
+    public static final String APF_NEW_RA_FILTER_FORCE_DISABLE =
+            "apf_new_ra_filter_force_disable";
 
     /**
      * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
@@ -388,8 +393,7 @@ public class NetworkStackUtils {
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
      * @param fd the socket's {@link FileDescriptor}.
      */
-    public static native void attachRaFilter(FileDescriptor fd)
-            throws SocketException;
+    public static native void attachRaFilter(FileDescriptor fd) throws ErrnoException;
 
     /**
      * Attaches a socket filter that accepts L2-L4 signaling traffic required for IP connectivity.
