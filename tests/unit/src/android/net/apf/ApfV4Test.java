@@ -13,23 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package android.net.apf;
 
-package com.android.networkstack.apishim;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
-import android.net.Ikev2VpnProfile;
-import android.os.Build;
-
-import androidx.annotation.RequiresApi;
+import org.junit.runner.RunWith;
 
 /**
- * A shim for Ikev2VpnProfile
+ * Tests for APF program generator and interpreter version 4.
  */
-// TODO: when available in all active branches: @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
-@RequiresApi(Build.VERSION_CODES.CUR_DEVELOPMENT)
-public class Ikev2VpnProfileShimImpl
-        extends com.android.networkstack.apishim.api34.Ikev2VpnProfileShimImpl {
-    // Currently identical to the API 34 shim, so inherit everything
-    protected Ikev2VpnProfileShimImpl(Ikev2VpnProfile profile) {
-        super(profile);
+@RunWith(AndroidJUnit4.class)
+@SmallTest
+public class ApfV4Test extends ApfTest {
+    @Override
+    protected int getApfVersionToTest() {
+        return 4;
     }
 }
