@@ -320,9 +320,9 @@ java_defaults {
         "datastallprotosnano",
         "statsprotos",
         "captiveportal-lib",
-        "net-utils-device-common",
         "net-utils-device-common-ip",
         "net-utils-device-common-netlink",
+        "net-utils-device-common-struct",
     ],
 }
 
@@ -340,7 +340,6 @@ android_library {
     ],
     static_libs: [
         "NetworkStackApiCurrentShims",
-        "net-utils-device-common-struct",
     ],
     manifest: "AndroidManifestBase.xml",
     visibility: [
@@ -361,7 +360,6 @@ android_library {
     ],
     static_libs: [
         "NetworkStackApiStableShims",
-        "net-utils-device-common-struct",
     ],
     manifest: "AndroidManifestBase.xml",
     visibility: [
@@ -390,6 +388,7 @@ java_library {
         "modules-utils-build",
         "net-utils-framework-common",
         "networkstack-client",
+        "net-utils-device-common",
     ],
     // If this library is ever used outside of tests, it should not use "Dhcp*Packet", and specify
     // its contents explicitly.
