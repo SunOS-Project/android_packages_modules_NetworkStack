@@ -55,8 +55,7 @@ import com.android.net.module.util.netlink.StructNdMsg.NUD_PROBE
 import com.android.net.module.util.netlink.StructNdMsg.NUD_REACHABLE
 import com.android.net.module.util.netlink.StructNdMsg.NUD_STALE
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics
-import com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION
-import com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION
+import com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION
 import com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION
 import com.android.testutils.makeNewNeighMessage
 import com.android.testutils.waitForIdle
@@ -263,13 +262,12 @@ class IpReachabilityMonitorTest {
         }.`when`(dependencies).makeIpNeighborMonitor(any(), any(), any())
         doReturn(mIpReachabilityMonitorMetrics)
                 .`when`(dependencies).getIpReachabilityMonitorMetrics()
+        doReturn(true).`when`(dependencies).isFeatureNotChickenedOut(any(),
+                eq(IP_REACHABILITY_MCAST_RESOLICIT_VERSION))
 
         // TODO: test with non-default flag combinations.
-        doReturn(false).`when`(dependencies).isFeatureEnabled(any(), anyString())
-        doReturn(false).`when`(dependencies).isFeatureNotChickenedOut(any(),
-            eq(IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION))
-        doReturn(false).`when`(dependencies).isFeatureNotChickenedOut(any(),
-            eq(IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION))
+        // Note: because dependencies is a mock, all features that are not specified here are
+        // neither enabled nor chickened out.
         doReturn(true).`when`(dependencies).isFeatureNotChickenedOut(any(),
             eq(IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION))
 
