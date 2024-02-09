@@ -124,7 +124,10 @@ android_test {
         "NetworkStackApiStableLib",
     ],
     platform_apis: true,
-    test_suites: ["general-tests", "mts-networking"],
+    test_suites: [
+        "general-tests",
+        "mts-networking",
+    ],
     compile_multilib: "both",
     manifest: "AndroidManifest_root.xml",
     jarjar_rules: ":NetworkStackJarJarRules",
@@ -138,7 +141,10 @@ android_test {
     name: "NetworkStackCoverageTests",
     certificate: "networkstack",
     platform_apis: true,
-    test_suites: ["device-tests", "mts-networking"],
+    test_suites: [
+        "device-tests",
+        "mts-networking",
+    ],
     test_config: "AndroidTest_Coverage.xml",
     defaults: [
         "NetworkStackReleaseTargetSdk",
