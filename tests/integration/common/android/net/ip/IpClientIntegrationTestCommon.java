@@ -78,7 +78,6 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
-import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
 import static com.android.testutils.MiscAsserts.assertThrows;
 import static com.android.testutils.ParcelUtils.parcelingRoundTrip;
@@ -170,6 +169,7 @@ import android.net.networkstack.aidl.ip.ReachabilityLossReason;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
+import android.net.util.HostnameTransliterator;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -179,6 +179,7 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.provider.Settings;
 import android.stats.connectivity.NudEventType;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -307,6 +308,10 @@ public abstract class IpClientIntegrationTestCommon {
     protected static final long TEST_TIMEOUT_MS = 2_000L;
     private static final long TEST_WAIT_ENOBUFS_TIMEOUT_MS = 30_000L;
     private static final long TEST_WAIT_RENEW_REBIND_RETRANSMIT_MS = 15_000L;
+    // To prevent the flakiness about deprecationTime and expirationTime check, +/- 4s tolerance
+    // should be enough between the timestamp when the IP provisioning completes successfully and
+    // when IpClientLinkObserver sees the RTM_NEWADDR netlink events.
+    private static final long TEST_LIFETIME_TOLERANCE_MS = 4_000L;
 
     @Rule
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
@@ -595,13 +600,13 @@ public abstract class IpClientIntegrationTestCommon {
                 }
 
                 @Override
-                public boolean getSendHostnameOption(final Context context) {
+                public boolean getSendHostnameOverlaySetting(final Context context) {
                     return mIsHostnameConfigurationEnabled;
                 }
 
                 @Override
                 public String getDeviceName(final Context context) {
-                    return mIsHostnameConfigurationEnabled ? mHostname : null;
+                    return mHostname;
                 }
             };
         }
@@ -742,6 +747,10 @@ public abstract class IpClientIntegrationTestCommon {
         // Enable DHCPv6 Prefix Delegation.
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION,
                 true /* isDhcp6PrefixDelegationEnabled */);
+
+        // Enable populating the IP Link Address lifetime.
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION,
+                true /* enabled */);
 
         setUpTapInterface();
         // It turns out that Router Solicitation will also be sent out even after the tap interface
@@ -1252,14 +1261,14 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryNeverStoreNetworkAttributes(TEST_L2KEY, TEST_TIMEOUT_MS);
     }
 
-    private void assertHostname(final boolean isHostnameConfigurationEnabled,
+    private void assertHostname(final boolean expectSendHostname,
             final String hostname, final String hostnameAfterTransliteration,
             final List<DhcpPacket> packetList) throws Exception {
         for (DhcpPacket packet : packetList) {
-            if (!isHostnameConfigurationEnabled || hostname == null) {
+            if (!expectSendHostname || hostname == null) {
                 assertNoHostname(packet.getHostname());
             } else {
-                assertEquals(packet.getHostname(), hostnameAfterTransliteration);
+                assertEquals(hostnameAfterTransliteration, packet.getHostname());
             }
         }
     }
@@ -1492,9 +1501,6 @@ public abstract class IpClientIntegrationTestCommon {
             final boolean shouldFirePreconnectionTimeout,
             final boolean timeoutBeforePreconnectionComplete) throws Exception {
         final long currentTime = System.currentTimeMillis();
-        final ArgumentCaptor<InterfaceConfigurationParcel> ifConfig =
-                ArgumentCaptor.forClass(InterfaceConfigurationParcel.class);
-
         startIpClientProvisioning(shouldReplyRapidCommitAck,
                 true /* isDhcpPreConnectionEnabled */,
                 false /* isDhcpIpConflictDetectEnabled */);
@@ -1551,12 +1557,7 @@ public abstract class IpClientIntegrationTestCommon {
             }
         }
         verify(mCb, timeout(TEST_TIMEOUT_MS)).setFallbackMulticastFilter(true);
-
-        final LinkAddress ipAddress = new LinkAddress(CLIENT_ADDR, PREFIX_LENGTH);
-        verify(mNetd, timeout(TEST_TIMEOUT_MS).times(1)).interfaceSetCfg(ifConfig.capture());
-        assertEquals(ifConfig.getValue().ifName, mIfaceName);
-        assertEquals(ifConfig.getValue().ipv4Addr, ipAddress.getAddress().getHostAddress());
-        assertEquals(ifConfig.getValue().prefixLength, PREFIX_LENGTH);
+        verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
     }
 
@@ -4241,8 +4242,7 @@ public abstract class IpClientIntegrationTestCommon {
                 NudEventType.NUD_POST_ROAMING_MAC_ADDRESS_CHANGED);
     }
 
-    private void doTestIpReachabilityMonitor_replyBroadcastArpRequestWithDiffMacAddresses(
-            boolean disconnect) throws Exception {
+    private void prepareIpReachabilityMonitorIpv4AddressResolutionTest() throws Exception {
         mNetworkAgentThread =
                 new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
         mNetworkAgentThread.start();
@@ -4267,6 +4267,11 @@ public abstract class IpClientIntegrationTestCommon {
         final byte[] data = new byte[100];
         random.nextBytes(data);
         sendUdpPacketToNetwork(mNetworkAgent.getNetwork(), SERVER_ADDR, 1234 /* port */, data);
+    }
+
+    private void doTestIpReachabilityMonitor_replyBroadcastArpRequestWithDiffMacAddresses(
+            boolean disconnect) throws Exception {
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
 
         // Respond to the broadcast ARP request.
         final ArpPacket request = getNextArpPacket();
@@ -4293,7 +4298,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @SignatureRequiredTest(reason = "Need to mock the NetworkAgent")
     public void testIpReachabilityMonitor_macAddressChangedWithoutRoam_ok()
             throws Exception {
         setFeatureChickenedOut(IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION,
@@ -4302,12 +4306,42 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @SignatureRequiredTest(reason = "Need to mock the NetworkAgent")
     public void testIpReachabilityMonitor_macAddressChangedWithoutRoam_disconnect()
             throws Exception {
         setFeatureChickenedOut(IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION,
                 true);
         doTestIpReachabilityMonitor_replyBroadcastArpRequestWithDiffMacAddresses(true);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure()
+            throws Exception {
+        setFeatureEnabled(NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
+                true /* ignoreOrganicNudFailure */);
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
+
+        ArpPacket packet;
+        while ((packet = getNextArpPacket(TEST_TIMEOUT_MS)) != null) {
+            // wait address resolution to complete.
+        }
+        verify(mCb, never()).onReachabilityFailure(any());
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure_flagoff()
+            throws Exception {
+        setFeatureEnabled(NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
+                false /* ignoreOrganicNudFailure */);
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
+
+        ArpPacket packet;
+        while ((packet = getNextArpPacket(TEST_TIMEOUT_MS)) != null) {
+            // wait address resolution to complete.
+        }
+        final ArgumentCaptor<ReachabilityLossInfoParcelable> lossInfoCaptor =
+                ArgumentCaptor.forClass(ReachabilityLossInfoParcelable.class);
+        verify(mCb).onReachabilityFailure(lossInfoCaptor.capture());
+        assertEquals(ReachabilityLossReason.ORGANIC, lossInfoCaptor.getValue().reason);
     }
 
     private void sendUdpPacketToNetwork(final Network network, final InetAddress remoteIp,
@@ -4324,6 +4358,7 @@ public abstract class IpClientIntegrationTestCommon {
             final Inet6Address targetIp,
             final boolean isIgnoreIncompleteIpv6DnsServerEnabled,
             final boolean isIgnoreIncompleteIpv6DefaultRouterEnabled,
+            final boolean isIgnoreOrganicNudFailureEnabled,
             final boolean expectNeighborLost) throws Exception {
         mNetworkAgentThread =
                 new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
@@ -4337,6 +4372,9 @@ public abstract class IpClientIntegrationTestCommon {
         setFeatureEnabled(
                 NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION,
                 isIgnoreIncompleteIpv6DefaultRouterEnabled);
+        setFeatureEnabled(
+                NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
+                isIgnoreOrganicNudFailureEnabled);
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .build();
         startIpClientProvisioning(config);
@@ -4388,18 +4426,17 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @SignatureRequiredTest(reason = "Need to mock NetworkAgent")
     public void testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack() throws Exception {
         final Inet6Address targetIp =
                 (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
                 true /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
     @Test
-    @SignatureRequiredTest(reason = "Need to mock NetworkAgent")
     public void testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack_flagoff()
             throws Exception {
         final Inet6Address targetIp =
@@ -4407,28 +4444,75 @@ public abstract class IpClientIntegrationTestCommon {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
                 false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
     }
 
     @Test
-    @SignatureRequiredTest(reason = "Need to mock the NetworkAgent")
     public void testIpReachabilityMonitor_incompleteIpv6DefaultRouterInDualStack()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
                 false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 true /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
     @Test
-    @SignatureRequiredTest(reason = "Need to mock the NetworkAgent")
     public void testIpReachabilityMonitor_incompleteIpv6DefaultRouterInDualStack_flagoff()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
                 false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
+                true /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreOnLinkIpv6DnsOrganicNudFailure()
+            throws Exception {
+        final Inet6Address targetIp =
+                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                true /* isIgnoreOrganicNudFailureEnabled */,
+                false /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreOnLinkIpv6DnsOrganicNudFailure_flagoff()
+            throws Exception {
+        final Inet6Address targetIp =
+                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
+                true /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv6DefaultRouterOrganicNudFailure()
+            throws Exception {
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
+                ROUTER_LINK_LOCAL /* targetIp */,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                true /* isIgnoreOrganicNudFailureEnabled */,
+                false /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv6DefaultRouterOrganicNudFailure_flagoff()
+            throws Exception {
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
+                ROUTER_LINK_LOCAL /* targetIp */,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
     }
 
@@ -4847,7 +4931,7 @@ public abstract class IpClientIntegrationTestCommon {
     private IaPrefixOption buildIaPrefixOption(final IpPrefix prefix, int preferred,
             int valid) {
         return new IaPrefixOption((short) IaPrefixOption.LENGTH, preferred, valid,
-                (byte) RFC7421_PREFIX_LENGTH, prefix.getRawAddress() /* prefix */);
+                (byte) prefix.getPrefixLength(), prefix.getRawAddress() /* prefix */);
     }
 
     private void handleDhcp6Packets(final IpPrefix prefix, boolean shouldReplyRapidCommit)
@@ -4908,7 +4992,25 @@ public abstract class IpClientIntegrationTestCommon {
         handleDhcp6Packets(prefix, true /* shouldReplyRapidCommit */);
         final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
-        assertTrue(hasIpv6AddressPrefixedWith(captor.getValue(), prefix));
+        final LinkProperties lp = captor.getValue();
+        assertTrue(hasIpv6AddressPrefixedWith(lp, prefix));
+
+        // Only run the test when the flag of parsing netlink events is enabled, where the
+        // deprecationTime and expirationTime is set.
+        if (mIsNetlinkEventParseEnabled) {
+            final long now = SystemClock.elapsedRealtime();
+            long when = 0;
+            for (LinkAddress la : lp.getLinkAddresses()) {
+                if (la.getAddress().isLinkLocalAddress()) {
+                    assertLinkAddressPermanentLifetime(la);
+                } else if (la.isGlobalPreferred()) {
+                    when = now + 4500 * 1000; // preferred=4500s
+                    assertLinkAddressDeprecationTime(la, when);
+                    when = now + 7200 * 1000; // valid=7200s
+                    assertLinkAddressExpirationTime(la, when);
+                }
+            }
+        }
     }
 
     @Test
@@ -5605,6 +5707,7 @@ public abstract class IpClientIntegrationTestCommon {
                 mNetd.getProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "accept_ra_defrtr"));
         assertEquals(1, acceptRaDefRtr);
     }
+
     private void runDhcpDomainSearchListOptionTest(final String domainName,
             final List<String> domainSearchList, final String expectedDomain) throws Exception {
         when(mResources.getBoolean(R.bool.config_dhcp_client_domain_search_list)).thenReturn(true);
@@ -5651,5 +5754,191 @@ public abstract class IpClientIntegrationTestCommon {
         final String expectedDomain = "google.com example.com";
         runDhcpDomainSearchListOptionTest(null /* domainName */, searchList,
                 expectedDomain);
+    }
+
+    private void assertLinkAddressDeprecationTime(final LinkAddress la, final long when) {
+        assertTrue(la.getDeprecationTime() != LinkAddress.LIFETIME_UNKNOWN);
+        // Allow +/- 2 seconds to prevent flaky tests
+        assertTrue(la.getDeprecationTime() < when + TEST_LIFETIME_TOLERANCE_MS);
+        assertTrue(la.getDeprecationTime() > when - TEST_LIFETIME_TOLERANCE_MS);
+    }
+
+    private void assertLinkAddressExpirationTime(final LinkAddress la, final long when) {
+        assertTrue(la.getExpirationTime() != LinkAddress.LIFETIME_UNKNOWN);
+        // Allow +/- 2 seconds to prevent flaky tests
+        assertTrue(la.getExpirationTime() < when + TEST_LIFETIME_TOLERANCE_MS);
+        assertTrue(la.getExpirationTime() > when - TEST_LIFETIME_TOLERANCE_MS);
+    }
+
+    private void assertLinkAddressPermanentLifetime(final LinkAddress la) {
+        assertEquals(LinkAddress.LIFETIME_PERMANENT, la.getDeprecationTime());
+        assertEquals(LinkAddress.LIFETIME_PERMANENT, la.getExpirationTime());
+    }
+
+    @Test
+    public void testPopulateLinkAddressLifetime() throws Exception {
+        // Only run the test when the flag of parsing netlink events is enabled to verify the
+        // code of setting deprecationTime/expirationTime added when IpClientLinkObserver sees
+        // the RTM_NEWADDR, and we are going to delete the dead old code path completely soon.
+        assumeTrue(mIsNetlinkEventParseEnabled);
+
+        final LinkProperties lp = doDualStackProvisioning();
+        final long now = SystemClock.elapsedRealtime();
+        long when = 0;
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            if (la.isIpv4()) {
+                when = now + 3600 * 1000; // DHCP lease duration
+                assertLinkAddressDeprecationTime(la, when);
+                assertLinkAddressExpirationTime(la, when);
+            } else if (la.isIpv6() && la.getAddress().isLinkLocalAddress()) {
+                assertLinkAddressPermanentLifetime(la);
+            } else if (la.isIpv6() && la.isGlobalPreferred()) {
+                when = now + 1800 * 1000; // preferred=1800s
+                assertLinkAddressDeprecationTime(la, when);
+                when = now + 3600 * 1000; // valid=3600s
+                assertLinkAddressExpirationTime(la, when);
+            }
+        }
+    }
+
+    @Test
+    public void testPopulateLinkAddressLifetime_infiniteLeaseDuration() throws Exception {
+        // Only run the test when the flag of parsing netlink events is enabled.
+        assumeTrue(mIsNetlinkEventParseEnabled);
+
+        final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
+                .withoutIPv6()
+                .build();
+
+        startIpClientProvisioning(cfg);
+        handleDhcpPackets(true /* isSuccessLease */, DhcpPacket.INFINITE_LEASE,
+                false /* shouldReplyRapidCommitAck */, TEST_DEFAULT_MTU,
+                null /* captivePortalApiUrl */, null /* ipv6OnlyWaitTime */,
+                null /* domainName */, null /* domainSearchList */);
+
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertNotNull(lp);
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            if (la.isIpv4()) {
+                assertLinkAddressPermanentLifetime(la);
+            }
+        }
+    }
+
+    @Test
+    public void testPopulateLinkAddressLifetime_minimalLeaseDuration() throws Exception {
+        // Only run the test when the flag of parsing netlink events is enabled.
+        assumeTrue(mIsNetlinkEventParseEnabled);
+
+        final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
+                .withoutIPv6()
+                .build();
+
+        startIpClientProvisioning(cfg);
+        handleDhcpPackets(true /* isSuccessLease */, 59 /* lease duration */,
+                false /* shouldReplyRapidCommitAck */, TEST_DEFAULT_MTU,
+                null /* captivePortalApiUrl */, null /* ipv6OnlyWaitTime */,
+                null /* domainName */, null /* domainSearchList */);
+
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertNotNull(lp);
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            if (la.isIpv4()) {
+                final long now = SystemClock.elapsedRealtime();
+                final long when = now + 60 * 1000; // minimal lease duration
+                assertLinkAddressDeprecationTime(la, when);
+                assertLinkAddressExpirationTime(la, when);
+            }
+        }
+    }
+
+    private void doDhcpHostnameSettingTest(int hostnameSetting,
+            boolean isHostnameConfigurationEnabled, boolean expectSendHostname) throws Exception {
+        final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
+                .withoutIPv6()
+                .withHostnameSetting(hostnameSetting)
+                .build();
+        final String expectedHostname;
+        final String expectedHostnameAfterTransliteration;
+        if (mDependencies != null) {
+            mDependencies.setHostnameConfiguration(isHostnameConfigurationEnabled,
+                    TEST_HOST_NAME);
+            expectedHostname = TEST_HOST_NAME;
+            expectedHostnameAfterTransliteration = TEST_HOST_NAME_TRANSLITERATION;
+        } else {
+            expectedHostname = Settings.Global.getString(
+                    InstrumentationRegistry.getInstrumentation().getContext().getContentResolver(),
+                    Settings.Global.DEVICE_NAME);
+            expectedHostnameAfterTransliteration = new HostnameTransliterator()
+                    .transliterate(expectedHostname);
+        }
+        startIpClientProvisioning(cfg);
+
+        // perform DHCP handshake and capture the packets sent from client such as
+        // DHCPDISCOVER and DHCPREQUEST.
+        final List<DhcpPacket> sentPackets = handleDhcpPackets(true /* isSuccessLease */,
+                DhcpPacket.INFINITE_LEASE,
+                false /* shouldReplyRapidCommitAck */, TEST_DEFAULT_MTU,
+                null /* captivePortalApiUrl */, null /* ipv6OnlyWaitTime */,
+                null /* domainName */, null /* domainSearchList */);
+
+        // check if the DHCP packet sent from the client takes a hostname option per different
+        // configs. Do not consider the null hostname case.
+        assertHostname(expectSendHostname, expectedHostname, expectedHostnameAfterTransliteration,
+                sentPackets);
+    }
+
+    @Test
+    @SignatureRequiredTest(reason = "need to mock setHostnameConfiguration")
+    public void testHostname_hostnameSettingUnset_enableHostnameConfig() throws Exception {
+        // If hostname setting is unset but legacy hostname overlay config is enabled,
+        // we expect that the DHCP packet takes a hostname option.
+        doDhcpHostnameSettingTest(IIpClient.HOSTNAME_SETTING_UNSET,
+                true /* isHostnameConfigurationEnabled */, true /* expectSendHostname */);
+    }
+
+    @Test
+    @SignatureRequiredTest(reason = "need to mock setHostnameConfiguration")
+    public void testHostname_hostnameSettingUnset_disableHostnameConfig() throws Exception {
+        // If hostname setting is unset and legacy hostname overlay config is disabled,
+        // we expect that the DHCP packet doesn't take a hostname option.
+        doDhcpHostnameSettingTest(IIpClient.HOSTNAME_SETTING_UNSET,
+                false /* isHostnameConfigurationEnabled */, false /* expectSendHostname */);
+    }
+
+    @Test
+    public void testHostname_hostnameSettingSend_enableHostnameConfig() throws Exception {
+        // If hostname setting is set and legacy hostname overlay config is enabled,
+        // we expect that the DHCP packet takes a hostname option.
+        doDhcpHostnameSettingTest(IIpClient.HOSTNAME_SETTING_SEND,
+                true /* isHostnameConfigurationEnabled */, true /* expectSendHostname */);
+    }
+
+    @Test
+    public void testHostname_hostnameSettingSend_disableHostnameConfig() throws Exception {
+        // If hostname setting is set and legacy hostname overlay config is disabled,
+        // we still expect that the DHCP packet takes a hostname option.
+        doDhcpHostnameSettingTest(IIpClient.HOSTNAME_SETTING_SEND,
+                false /* isHostnameConfigurationEnabled */, true /* expectSendHostname */);
+    }
+
+    @Test
+    public void testHostname_hostnameSettingNotSend_enableHostnameConfig() throws Exception {
+        // If hostname setting is not send and even if legacy hostname overlay config is
+        // enabled, we expect that the DHCP packet doesn't take a hostname option.
+        doDhcpHostnameSettingTest(IIpClient.HOSTNAME_SETTING_DO_NOT_SEND,
+                true /* isHostnameConfigurationEnabled */, false /* expectSendHostname */);
+    }
+
+    @Test
+    public void testHostname_hostnameSettingNotSend_disableHostnameConfig() throws Exception {
+        // If hostname setting is not send and even if legacy hostname overlay config is
+        // disabled, we expect that the DHCP packet doesn't take a hostname option.
+        doDhcpHostnameSettingTest(IIpClient.HOSTNAME_SETTING_DO_NOT_SEND,
+                false /* isHostnameConfigurationEnabled */, false /* expectSendHostname */);
     }
 }
