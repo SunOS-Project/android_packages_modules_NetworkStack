@@ -173,7 +173,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.StringJoiner;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -1407,6 +1410,86 @@ public class IpClient extends StateMachine {
         pw.decreaseIndent();
     }
 
+    /**
+     * Handle "adb shell cmd apf" command.
+     */
+    public String apfShellCommand(String cmd, @Nullable String optarg) {
+        final long oneDayInMs = 86400 * 1000;
+        if (SystemClock.elapsedRealtime() >= oneDayInMs) {
+            return "Error: This test interface requires uptime < 24h";
+        }
+
+        // Waiting for a "read" result cannot block the handler thread, since the result gets
+        // processed on it. This is test only code, so mApfFilter going away is not a concern.
+        if (cmd.equals("read")) {
+            if (mApfFilter == null) {
+                return "Error: No active APF filter";
+            }
+            // Request a new snapshot, then wait for it.
+            mApfDataSnapshotComplete.close();
+            mCallback.startReadPacketFilter();
+            if (!mApfDataSnapshotComplete.block(5000 /* ms */)) {
+                return "Error: Failed to read APF program";
+            }
+        }
+
+        final CompletableFuture<String> result = new CompletableFuture<>();
+
+        getHandler().post(() -> {
+            try {
+                if (mApfFilter == null) {
+                    // IpClient has either stopped or the interface does not support APF.
+                    throw new IllegalStateException("No active APF filter.");
+                }
+                switch (cmd) {
+                    case "status":
+                        result.complete(mApfFilter.isRunning() ? "running" : "paused");
+                        break;
+                    case "pause":
+                        mApfFilter.pause();
+                        result.complete("success");
+                        break;
+                    case "resume":
+                        mApfFilter.resume();
+                        result.complete("success");
+                        break;
+                    case "install":
+                        Objects.requireNonNull(optarg, "No program provided");
+                        if (mApfFilter.isRunning()) {
+                            throw new IllegalStateException("APF filter must first be paused");
+                        }
+                        mCallback.installPacketFilter(HexDump.hexStringToByteArray(optarg));
+                        result.complete("success");
+                        break;
+                    case "capabilities":
+                        final StringJoiner joiner = new StringJoiner(",");
+                        joiner.add(Integer.toString(mCurrentApfCapabilities.apfVersionSupported));
+                        joiner.add(Integer.toString(mCurrentApfCapabilities.maximumApfProgramSize));
+                        joiner.add(Integer.toString(mCurrentApfCapabilities.apfPacketFormat));
+                        result.complete(joiner.toString());
+                        break;
+                    case "read":
+                        final String snapshot = mApfFilter.getDataSnapshotHexString();
+                        Objects.requireNonNull(snapshot, "No data snapshot recorded.");
+                        result.complete(snapshot);
+                        break;
+                    default:
+                        throw new IllegalArgumentException("Invalid apf read command: " + cmd);
+                }
+            } catch (Exception e) {
+                result.completeExceptionally(e);
+            }
+        });
+
+        try {
+            return result.get();
+        } catch (ExecutionException | InterruptedException e) {
+            // completeExceptionally is solely used to return error messages back to the user, so
+            // the stack trace is not all that interesting. (A similar argument can be made for
+            // InterruptedException). Only extract the message from the checked exception.
+            throw new RuntimeException(e.getMessage());
+        }
+    }
 
     /**
      * Internals.
