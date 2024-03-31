@@ -49,6 +49,8 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     /**
      * Add an instruction to the end of the program to increment the counter value and
      * immediately return PASS.
+     *
+     * @param cnt the counter number to be incremented.
      */
     public final Type addCountAndPass(int cnt) {
         checkRange("CounterNumber", cnt /* value */, 1 /* lowerBound */,
@@ -68,6 +70,8 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     /**
      * Add an instruction to the end of the program to increment the counter value and
      * immediately return DROP.
+     *
+     * @param cnt the counter number to be incremented.
      */
     public final Type addCountAndDrop(int cnt) {
         checkRange("CounterNumber", cnt /* value */, 1 /* lowerBound */,
@@ -95,6 +99,13 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     }
 
     /**
+     * Add an instruction to the beginning of the program to reserve the empty data region.
+     */
+    public final Type addData() throws IllegalInstructionException {
+        return addData(new byte[0]);
+    }
+
+    /**
      * Add an instruction to the beginning of the program to reserve the data region.
      * @param data the actual data byte
      */
@@ -102,9 +113,12 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (!mInstructions.isEmpty()) {
             throw new IllegalInstructionException("data instruction has to come first");
         }
+        if (data.length > 65535) {
+            throw new IllegalArgumentException("data size larger than 65535");
+        }
         mIsV6 = true;
         return append(new Instruction(Opcodes.JMP, Rbit1).addUnsigned(data.length)
-                .setBytesImm(data));
+                .setBytesImm(data).overrideLenField(2));
     }
 
     /**

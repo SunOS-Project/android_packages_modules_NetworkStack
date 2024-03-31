@@ -28,7 +28,6 @@ import static com.android.net.module.util.netlink.NetlinkConstants.RTN_UNICAST;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_KERNEL;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_RA;
 import static com.android.net.module.util.netlink.NetlinkConstants.RT_SCOPE_UNIVERSE;
-import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION;
 
 import android.app.AlarmManager;
 import android.content.Context;
@@ -214,11 +213,6 @@ public class IpClientLinkObserver {
 
     public void shutdown() {
         mHandler.post(mNetlinkMonitor::stop);
-    }
-
-    private boolean isIpv6LinkLocalDnsAccepted() {
-        return mDependencies.isFeatureNotChickenedOut(mContext,
-                IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION);
     }
 
     private void maybeLog(String operation, String iface, LinkAddress address) {
@@ -493,9 +487,7 @@ public class IpClientLinkObserver {
     private void processRdnssOption(StructNdOptRdnss opt) {
         final String[] addresses = new String[opt.servers.length];
         for (int i = 0; i < opt.servers.length; i++) {
-            final Inet6Address addr = isIpv6LinkLocalDnsAccepted()
-                    ? InetAddressUtils.withScopeId(opt.servers[i], mIfindex)
-                    : opt.servers[i];
+            final Inet6Address addr = InetAddressUtils.withScopeId(opt.servers[i], mIfindex);
             addresses[i] = addr.getHostAddress();
         }
         updateInterfaceDnsServerInfo(opt.header.lifetime, addresses);
@@ -520,8 +512,7 @@ public class IpClientLinkObserver {
         }
     }
 
-    private void updateClatInterfaceLinkState(@NonNull final StructIfinfoMsg ifinfoMsg,
-            @Nullable final String ifname, short nlMsgType) {
+    private void updateClatInterfaceLinkState(@Nullable final String ifname, short nlMsgType) {
         switch (nlMsgType) {
             case NetlinkConstants.RTM_NEWLINK:
                 if (mClatInterfaceExists) break;
@@ -549,7 +540,7 @@ public class IpClientLinkObserver {
         final short nlMsgType = msg.getHeader().nlmsg_type;
         final StructIfinfoMsg ifinfoMsg = msg.getIfinfoHeader();
         if (mClatInterfaceName.equals(ifname)) {
-            updateClatInterfaceLinkState(ifinfoMsg, ifname, nlMsgType);
+            updateClatInterfaceLinkState(ifname, nlMsgType);
             return;
         }
 
@@ -575,31 +566,27 @@ public class IpClientLinkObserver {
         }
     }
 
-    // The preferred/valid in ifa_cacheinfo expressed in units of seconds, convert
-    // it to milliseconds for deprecationTime or expirationTime used in LinkAddress.
-    // If the experiment flag is not enabled, LinkAddress.LIFETIME_UNKNOWN is retuend,
-    // the same as before.
-    private long getDeprecationOrExpirationTime(@Nullable final StructIfacacheInfo cacheInfo,
-            long now, boolean deprecationTime) {
-        if (!mConfig.populateLinkAddressLifetime || (cacheInfo == null)) {
-            return LinkAddress.LIFETIME_UNKNOWN;
-        }
-        final long lifetime = deprecationTime ? cacheInfo.preferred : cacheInfo.valid;
-        return (lifetime == Integer.toUnsignedLong(INFINITE_LEASE))
-                ? LinkAddress.LIFETIME_PERMANENT
-                : now + lifetime * 1000;
-    }
-
     private void processRtNetlinkAddressMessage(RtNetlinkAddressMessage msg) {
         final StructIfaddrMsg ifaddrMsg = msg.getIfaddrHeader();
         if (ifaddrMsg.index != mIfindex) return;
 
         final StructIfacacheInfo cacheInfo = msg.getIfacacheInfo();
-        final long now = SystemClock.elapsedRealtime();
-        final long deprecationTime =
-                getDeprecationOrExpirationTime(cacheInfo, now, true /* deprecationTime */);
-        final long expirationTime =
-                getDeprecationOrExpirationTime(cacheInfo, now, false /* deprecationTime */);
+        long deprecationTime = LinkAddress.LIFETIME_UNKNOWN;
+        long expirationTime = LinkAddress.LIFETIME_UNKNOWN;
+        if (cacheInfo != null && mConfig.populateLinkAddressLifetime) {
+            deprecationTime = LinkAddress.LIFETIME_PERMANENT;
+            expirationTime = LinkAddress.LIFETIME_PERMANENT;
+
+            final long now = SystemClock.elapsedRealtime();
+            // TODO: change INFINITE_LEASE to long so the pesky conversions can be removed.
+            if (cacheInfo.preferred < Integer.toUnsignedLong(INFINITE_LEASE)) {
+                deprecationTime = now + (cacheInfo.preferred /* seconds */  * 1000);
+            }
+            if (cacheInfo.valid < Integer.toUnsignedLong(INFINITE_LEASE)) {
+                expirationTime = now + (cacheInfo.valid /* seconds */  * 1000);
+            }
+        }
+
         final LinkAddress la = new LinkAddress(msg.getIpAddress(), ifaddrMsg.prefixLen,
                 msg.getFlags(), ifaddrMsg.scope, deprecationTime, expirationTime);
 
