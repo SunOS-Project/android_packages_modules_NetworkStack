@@ -383,13 +383,12 @@ public abstract class BaseApfGenerator {
             return addUnsigned(imm);
         }
 
-        Instruction addTwosCompSigned(int imm) {
+        Instruction addTwosCompSigned(long imm) {
             mIntImms.add(IntImmediate.newTwosComplementSigned(imm));
             return this;
         }
 
-
-        Instruction addTwosCompUnsigned(int imm) {
+        Instruction addTwosCompUnsigned(long imm) {
             mIntImms.add(IntImmediate.newTwosComplementUnsigned(imm));
             return this;
         }
@@ -460,7 +459,8 @@ public abstract class BaseApfGenerator {
                 return 0;
             }
             int size = 1;
-            int indeterminateSize = calculateRequiredIndeterminateSize();
+            int indeterminateSize = mLenFieldOverride != -1 ? mLenFieldOverride
+                    : calculateRequiredIndeterminateSize();
             for (IntImmediate imm : mIntImms) {
                 size += imm.getEncodingSize(indeterminateSize);
             }
@@ -547,7 +547,8 @@ public abstract class BaseApfGenerator {
             }
             int writingOffset = offset;
             bytecode[writingOffset++] = generateInstructionByte();
-            int indeterminateSize = calculateRequiredIndeterminateSize();
+            int indeterminateSize = mLenFieldOverride != -1 ? mLenFieldOverride
+                    : calculateRequiredIndeterminateSize();
             int startOffset = 0;
             if (mOpcode == Opcodes.EXT) {
                 // For extend opcode, always write the actual opcode first.
@@ -773,6 +774,6 @@ public abstract class BaseApfGenerator {
     private final HashMap<String, Instruction> mLabels = new HashMap<String, Instruction>();
     private final Instruction mDropLabel = new Instruction(Opcodes.LABEL);
     private final Instruction mPassLabel = new Instruction(Opcodes.LABEL);
-    private final int mVersion;
+    public final int mVersion;
     public boolean mGenerated;
 }
