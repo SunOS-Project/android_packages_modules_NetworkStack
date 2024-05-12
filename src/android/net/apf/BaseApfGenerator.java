@@ -84,7 +84,12 @@ public abstract class BaseApfGenerator {
         JGT(17),   // Compare greater than and branch, e.g. "jgt R0,5,label"
         JLT(18),   // Compare less than and branch, e.g. "jlt R0,5,label"
         JSET(19),  // Compare any bits set and branch, e.g. "jset R0,5,label"
-        JNEBS(20), // Compare not equal byte sequence, e.g. "jnebs R0,5,label,0x1122334455"
+        // Compare not equal byte sequence, e.g. "jnebs R0,5,label,0x1122334455"
+        // NOTE: Only APFv6+ implements R=1 'jbseq' version and multi match
+        // imm1 is jmp target, imm2 is (cnt - 1) * 2048 + compare_len,
+        // which is followed by cnt * compare_len bytes to compare against.
+        // Warning: do not specify the same byte sequence multiple times.
+        JBSMATCH(20),
         EXT(21),   // Followed by immediate indicating ExtendedOpcodes.
         LDDW(22),  // Load 4 bytes from data memory address (register + immediate): "lddw R0, [5]R1"
         STDW(23),  // Store 4 bytes to data memory address (register + immediate): "stdw R0, [5]R1"
@@ -179,7 +184,12 @@ public abstract class BaseApfGenerator {
         //        middle 2 bits - 1..4 length of immediates - 1
         //        bottom 1 bit  - =0 jmp if in set, =1 if not in set
         // imm4(imm3 * 1/2/3/4 bytes): the *UNIQUE* values to compare against
-        JONEOF(47);
+        JONEOF(47),
+        /* Specify length of exception buffer, which is populated on abnormal program termination.
+         * imm1: Extended opcode
+         * imm2(u16): Length of exception buffer (located *immediately* after the program itself)
+         */
+        EXCEPTIONBUFFER(48);
 
         final int value;
 
@@ -500,6 +510,22 @@ public abstract class BaseApfGenerator {
         }
 
         /**
+         * Updates exception buffer size.
+         * @param bufSize the new exception buffer size
+         */
+        void updateExceptionBufferSize(int bufSize) throws IllegalInstructionException {
+            if (mOpcode != Opcodes.EXT || mIntImms.get(0).mValue
+                    != ExtendedOpcodes.EXCEPTIONBUFFER.value) {
+                throw new IllegalInstructionException(
+                        "updateExceptionBuffer() is only valid for EXCEPTIONBUFFER opcode");
+            }
+            // Update the buffer size immediate (second imm) value. Due to mValue within
+            // IntImmediate being final, we must remove and re-add the value to apply changes.
+            mIntImms.remove(1);
+            addU16(bufSize);
+        }
+
+        /**
          * @return size of instruction in bytes.
          */
         int size() {
@@ -722,6 +748,11 @@ public abstract class BaseApfGenerator {
     }
 
     /**
+     * Updates the exception buffer size.
+     */
+    abstract void updateExceptionBufferSize(int programSize) throws IllegalInstructionException;
+
+    /**
      * Generate the bytecode for the APF program.
      * @return the bytecode.
      * @throws IllegalStateException if a label is referenced but not defined.
@@ -760,6 +791,7 @@ public abstract class BaseApfGenerator {
         } while (shrunk);
         // Generate bytecode for instructions.
         byte[] bytecode = new byte[total_size];
+        updateExceptionBufferSize(total_size);
         for (Instruction instruction : mInstructions) {
             instruction.generate(bytecode);
         }

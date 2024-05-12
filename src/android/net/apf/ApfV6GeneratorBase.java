@@ -17,14 +17,18 @@ package android.net.apf;
 
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
+import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
 
 import androidx.annotation.NonNull;
 
-import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.HexDump;
 
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
@@ -38,14 +42,17 @@ import java.util.Set;
 public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> extends
         ApfV4GeneratorBase<Type> {
 
+    final int mMaximumApfProgramSize;
+
     /**
      * Creates an ApfV6GeneratorBase instance which is able to emit instructions for the specified
      * {@code version} of the APF interpreter. Throws {@code IllegalInstructionException} if
      * the requested version is unsupported.
      *
      */
-    public ApfV6GeneratorBase() throws IllegalInstructionException {
+    public ApfV6GeneratorBase(int maximumApfProgramSize) throws IllegalInstructionException {
         super(APF_VERSION_6, false);
+        this.mMaximumApfProgramSize = maximumApfProgramSize;
     }
 
     /**
@@ -120,6 +127,14 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         }
         return append(new Instruction(Opcodes.JMP, Rbit1).addUnsigned(data.length)
                 .setBytesImm(data).overrideImmSize(2));
+    }
+
+    /**
+     * Add an instruction to the end of the program to set the exception buffer size.
+     * @param bufSize the exception buffer size
+     */
+    public final Type addExceptionBuffer(int bufSize) throws IllegalInstructionException {
+        return append(new Instruction(ExtendedOpcodes.EXCEPTIONBUFFER).addU16(bufSize));
     }
 
     /**
@@ -423,8 +438,76 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     public final Type addJumpIfBytesAtR0Equal(@NonNull byte[] bytes, String tgt)
             throws IllegalInstructionException {
         validateBytes(bytes);
-        return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
+        return append(new Instruction(Opcodes.JBSMATCH, R1).addUnsigned(
                 bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
+    }
+
+    private List<byte[]> validateDeduplicateBytesList(List<byte[]> bytesList) {
+        if (bytesList == null || bytesList.size() == 0) {
+            throw new IllegalArgumentException(
+                    "bytesList size must > 0, current size: "
+                            + (bytesList == null ? "null" : bytesList.size()));
+        }
+        for (byte[] bytes : bytesList) {
+            validateBytes(bytes);
+        }
+        final int elementSize = bytesList.get(0).length;
+        if (elementSize > 2097151) { // 2 ^ 21 - 1
+            throw new IllegalArgumentException("too many elements");
+        }
+        List<byte[]> deduplicatedList = new ArrayList<>();
+        deduplicatedList.add(bytesList.get(0));
+        for (int i = 1; i < bytesList.size(); ++i) {
+            if (elementSize != bytesList.get(i).length) {
+                throw new IllegalArgumentException("byte arrays in the set have different size");
+            }
+            int j = 0;
+            for (; j < deduplicatedList.size(); ++j) {
+                if (Arrays.equals(bytesList.get(i), deduplicatedList.get(j))) {
+                    break;
+                }
+            }
+            if (j == deduplicatedList.size()) {
+                deduplicatedList.add(bytesList.get(i));
+            }
+        }
+        return deduplicatedList;
+    }
+
+    private Type addJumpIfBytesAtR0EqualsHelper(@NonNull List<byte[]> bytesList, String tgt,
+            boolean jumpOnMatch) {
+        final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
+        final int elementSize = deduplicatedList.get(0).length;
+        final int totalElements = deduplicatedList.size();
+        final int totalSize = elementSize * totalElements;
+        final ByteBuffer buffer = ByteBuffer.allocate(totalSize);
+        for (byte[] array : deduplicatedList) {
+            buffer.put(array);
+        }
+        final Rbit rbit = jumpOnMatch ? Rbit1 : Rbit0;
+        final byte[] combinedBytes = buffer.array();
+        return append(new Instruction(Opcodes.JBSMATCH, rbit)
+                .addUnsigned((totalElements - 1) << 11 | elementSize)
+                .setTargetLabel(tgt)
+                .setBytesImm(combinedBytes));
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by register0 match any of the elements in {@code bytesSet}.
+     * R=1 means check for equal.
+     */
+    public final Type addJumpIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList, String tgt) {
+        return addJumpIfBytesAtR0EqualsHelper(bytesList, tgt, true /* jumpOnMatch */);
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by register0 match none of the elements in {@code bytesSet}.
+     * R=0 means check for not equal.
+     */
+    public final Type addJumpIfBytesAtR0EqualNoneOf(@NonNull List<byte[]> bytesList, String tgt) {
+        return addJumpIfBytesAtR0EqualsHelper(bytesList, tgt, false /* jumpOnMatch */);
     }
 
 
@@ -471,7 +554,7 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
 
     private Type addJumpIfOneOfHelper(Register reg, @NonNull Set<Long> values,
             boolean jumpOnMatch, @NonNull String tgt) {
-        if (CollectionUtils.isEmpty(values) || values.size() > 33 || values.size() < 2) {
+        if (values == null || values.size() < 2 || values.size() > 33)  {
             throw new IllegalArgumentException(
                     "size of values set must be >= 2 and <= 33, current size: " + values.size());
         }
@@ -479,7 +562,9 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         final Long min = Collections.min(values);
         checkRange("max value in set", max, 0, 4294967295L);
         checkRange("min value in set", min, 0, 4294967295L);
-        final int maxImmSize = Math.max(0, calculateImmSize(max.intValue(), false));
+        // Since sets are always of size > 1 and in range [0, uint32_max], max is guaranteed > 0,
+        // so maxImmSize can never be 0.
+        final int maxImmSize = calculateImmSize(max.intValue(), false);
 
         // imm3(u8): top 5 bits - number of following u8/be16/be32 values - 2
         // middle 2 bits - 1..4 length of immediates - 1
@@ -526,8 +611,8 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     }
 
     @Override
-    void addArithR1(Opcodes opcode) {
-        append(new Instruction(opcode, R1));
+    void addR0ArithR1(Opcodes opcode) {
+        append(new Instruction(opcode, R0));  // APFv6+: R0 op= R1
     }
 
     /**
