@@ -37,8 +37,9 @@ import java.util.List;
  */
 public abstract class BaseApfGenerator {
 
-    public BaseApfGenerator(int mVersion) {
+    public BaseApfGenerator(int mVersion, boolean mDisableCounterRangeCheck) {
         this.mVersion = mVersion;
+        this.mDisableCounterRangeCheck = mDisableCounterRangeCheck;
     }
 
     /**
@@ -55,7 +56,7 @@ public abstract class BaseApfGenerator {
         // An optional unsigned immediate value can be provided to encode the counter number.
         // If the value is non-zero, the instruction increments the counter.
         // The counter is located (-4 * counter number) bytes from the end of the data region.
-        // It is a U32 big-endian value and is always incremented by 1.
+        // It is a U32 native-endian value and is always incremented by 1.
         // This is more or less equivalent to: lddw R0, -N4; add R0,1; stdw R0, -N4; {pass,drop}
         // e.g. "pass", "pass 1", "drop", "drop 1"
         PASSDROP(0),
@@ -169,7 +170,16 @@ public abstract class BaseApfGenerator {
         //       "jdnsane R0,label,0xc,\002aa\005local\0\0"
 
         JDNSAMATCH(44),
-        JDNSAMATCHSAFE(46);
+        JDNSAMATCHSAFE(46),
+        // Jump if register is [not] one of the list of values
+        // R bit - specifies the register (R0/R1) to test
+        // imm1: Extended opcode
+        // imm2: Jump label offset
+        // imm3(u8): top 5 bits - number of following u8/be16/be32 values - 1
+        //        middle 2 bits - 1..4 length of immediates - 1
+        //        bottom 1 bit  - =0 jmp if in set, =1 if not in set
+        // imm4(imm3 * 1/2/3/4 bytes): the *UNIQUE* values to compare against
+        JONEOF(47);
 
         final int value;
 
@@ -658,7 +668,7 @@ public abstract class BaseApfGenerator {
     /**
      * Calculate the size of the imm.
      */
-    private static int calculateImmSize(int imm, boolean signed) {
+    static int calculateImmSize(int imm, boolean signed) {
         if (imm == 0) {
             return 0;
         }
@@ -681,7 +691,8 @@ public abstract class BaseApfGenerator {
                         upperBound));
     }
 
-    static void checkPassCounterRange(ApfCounterTracker.Counter cnt) {
+    void checkPassCounterRange(ApfCounterTracker.Counter cnt) {
+        if (mDisableCounterRangeCheck) return;
         if (cnt.value() < ApfCounterTracker.MIN_PASS_COUNTER.value()
                 || cnt.value() > ApfCounterTracker.MAX_PASS_COUNTER.value()) {
             throw new IllegalArgumentException(
@@ -691,7 +702,8 @@ public abstract class BaseApfGenerator {
         }
     }
 
-    static void checkDropCounterRange(ApfCounterTracker.Counter cnt) {
+    void checkDropCounterRange(ApfCounterTracker.Counter cnt) {
+        if (mDisableCounterRangeCheck) return;
         if (cnt.value() < ApfCounterTracker.MIN_DROP_COUNTER.value()
                 || cnt.value() > ApfCounterTracker.MAX_DROP_COUNTER.value()) {
             throw new IllegalArgumentException(
@@ -882,4 +894,5 @@ public abstract class BaseApfGenerator {
     private final Instruction mPassLabel = new Instruction(Opcodes.LABEL);
     public final int mVersion;
     public boolean mGenerated;
+    private final boolean mDisableCounterRangeCheck;
 }
