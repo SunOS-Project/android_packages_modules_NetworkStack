@@ -16,47 +16,47 @@
 
 package android.net.apf;
 
-import static android.net.apf.ApfConstant.APF_MAX_ETH_TYPE_BLACK_LIST_LEN;
-import static android.net.apf.ApfConstant.ARP_HEADER_OFFSET;
-import static android.net.apf.ApfConstant.ARP_IPV4_HEADER;
-import static android.net.apf.ApfConstant.ARP_OPCODE_OFFSET;
-import static android.net.apf.ApfConstant.ARP_OPCODE_REPLY;
-import static android.net.apf.ApfConstant.ARP_OPCODE_REQUEST;
-import static android.net.apf.ApfConstant.ARP_SOURCE_IP_ADDRESS_OFFSET;
-import static android.net.apf.ApfConstant.ARP_TARGET_IP_ADDRESS_OFFSET;
-import static android.net.apf.ApfConstant.DHCP_CLIENT_MAC_OFFSET;
-import static android.net.apf.ApfConstant.DHCP_CLIENT_PORT;
-import static android.net.apf.ApfConstant.ECHO_PORT;
-import static android.net.apf.ApfConstant.ETH_DEST_ADDR_OFFSET;
-import static android.net.apf.ApfConstant.ETH_ETHERTYPE_OFFSET;
-import static android.net.apf.ApfConstant.ETH_HEADER_LEN;
-import static android.net.apf.ApfConstant.ETH_MULTICAST_MDNS_V4_MAC_ADDRESS;
-import static android.net.apf.ApfConstant.ETH_MULTICAST_MDNS_V6_MAC_ADDRESS;
-import static android.net.apf.ApfConstant.ETH_TYPE_MAX;
-import static android.net.apf.ApfConstant.ETH_TYPE_MIN;
-import static android.net.apf.ApfConstant.FIXED_ARP_REPLY_HEADER;
-import static android.net.apf.ApfConstant.ICMP6_TYPE_OFFSET;
-import static android.net.apf.ApfConstant.IPPROTO_HOPOPTS;
-import static android.net.apf.ApfConstant.IPV4_ANY_HOST_ADDRESS;
-import static android.net.apf.ApfConstant.IPV4_BROADCAST_ADDRESS;
-import static android.net.apf.ApfConstant.IPV4_DEST_ADDR_OFFSET;
-import static android.net.apf.ApfConstant.IPV4_FRAGMENT_MORE_FRAGS_MASK;
-import static android.net.apf.ApfConstant.IPV4_FRAGMENT_OFFSET_MASK;
-import static android.net.apf.ApfConstant.IPV4_FRAGMENT_OFFSET_OFFSET;
-import static android.net.apf.ApfConstant.IPV4_PROTOCOL_OFFSET;
-import static android.net.apf.ApfConstant.IPV4_TOTAL_LENGTH_OFFSET;
-import static android.net.apf.ApfConstant.IPV6_ALL_NODES_ADDRESS;
-import static android.net.apf.ApfConstant.IPV6_DEST_ADDR_OFFSET;
-import static android.net.apf.ApfConstant.IPV6_FLOW_LABEL_LEN;
-import static android.net.apf.ApfConstant.IPV6_FLOW_LABEL_OFFSET;
-import static android.net.apf.ApfConstant.IPV6_HEADER_LEN;
-import static android.net.apf.ApfConstant.IPV6_NEXT_HEADER_OFFSET;
-import static android.net.apf.ApfConstant.IPV6_SRC_ADDR_OFFSET;
-import static android.net.apf.ApfConstant.MDNS_PORT;
-import static android.net.apf.ApfConstant.MDNS_QDCOUNT_OFFSET;
-import static android.net.apf.ApfConstant.MDNS_QNAME_OFFSET;
-import static android.net.apf.ApfConstant.TCP_HEADER_SIZE_OFFSET;
-import static android.net.apf.ApfConstant.TCP_UDP_DESTINATION_PORT_OFFSET;
+import static android.net.apf.ApfConstants.APF_MAX_ETH_TYPE_BLACK_LIST_LEN;
+import static android.net.apf.ApfConstants.ARP_HEADER_OFFSET;
+import static android.net.apf.ApfConstants.ARP_IPV4_HEADER;
+import static android.net.apf.ApfConstants.ARP_OPCODE_OFFSET;
+import static android.net.apf.ApfConstants.ARP_OPCODE_REPLY;
+import static android.net.apf.ApfConstants.ARP_OPCODE_REQUEST;
+import static android.net.apf.ApfConstants.ARP_SOURCE_IP_ADDRESS_OFFSET;
+import static android.net.apf.ApfConstants.ARP_TARGET_IP_ADDRESS_OFFSET;
+import static android.net.apf.ApfConstants.DHCP_CLIENT_MAC_OFFSET;
+import static android.net.apf.ApfConstants.DHCP_CLIENT_PORT;
+import static android.net.apf.ApfConstants.ECHO_PORT;
+import static android.net.apf.ApfConstants.ETH_DEST_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.ETH_ETHERTYPE_OFFSET;
+import static android.net.apf.ApfConstants.ETH_HEADER_LEN;
+import static android.net.apf.ApfConstants.ETH_MULTICAST_MDNS_V4_MAC_ADDRESS;
+import static android.net.apf.ApfConstants.ETH_MULTICAST_MDNS_V6_MAC_ADDRESS;
+import static android.net.apf.ApfConstants.ETH_TYPE_MAX;
+import static android.net.apf.ApfConstants.ETH_TYPE_MIN;
+import static android.net.apf.ApfConstants.FIXED_ARP_REPLY_HEADER;
+import static android.net.apf.ApfConstants.ICMP6_TYPE_OFFSET;
+import static android.net.apf.ApfConstants.IPPROTO_HOPOPTS;
+import static android.net.apf.ApfConstants.IPV4_ANY_HOST_ADDRESS;
+import static android.net.apf.ApfConstants.IPV4_BROADCAST_ADDRESS;
+import static android.net.apf.ApfConstants.IPV4_DEST_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.IPV4_FRAGMENT_MORE_FRAGS_MASK;
+import static android.net.apf.ApfConstants.IPV4_FRAGMENT_OFFSET_MASK;
+import static android.net.apf.ApfConstants.IPV4_FRAGMENT_OFFSET_OFFSET;
+import static android.net.apf.ApfConstants.IPV4_PROTOCOL_OFFSET;
+import static android.net.apf.ApfConstants.IPV4_TOTAL_LENGTH_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_ALL_NODES_ADDRESS;
+import static android.net.apf.ApfConstants.IPV6_DEST_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_FLOW_LABEL_LEN;
+import static android.net.apf.ApfConstants.IPV6_FLOW_LABEL_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_HEADER_LEN;
+import static android.net.apf.ApfConstants.IPV6_NEXT_HEADER_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_SRC_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.MDNS_PORT;
+import static android.net.apf.ApfConstants.MDNS_QDCOUNT_OFFSET;
+import static android.net.apf.ApfConstants.MDNS_QNAME_OFFSET;
+import static android.net.apf.ApfConstants.TCP_HEADER_SIZE_OFFSET;
+import static android.net.apf.ApfConstants.TCP_UDP_DESTINATION_PORT_OFFSET;
 import static android.net.apf.BaseApfGenerator.MemorySlot;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
@@ -84,6 +84,8 @@ import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SO
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_LEN;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -101,11 +103,9 @@ import android.stats.connectivity.NetworkQuirkEvent;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.text.format.DateUtils;
+import android.util.ArraySet;
 import android.util.Log;
 import android.util.SparseArray;
-
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
@@ -126,6 +126,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.SocketAddress;
 import java.net.SocketException;
@@ -138,6 +139,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * For networks that support packet filtering via APF programs, {@code ApfFilter}
@@ -228,6 +230,7 @@ public class ApfFilter implements AndroidPacketFilter {
     private final TokenBucket mTokenBucket;
 
     @VisibleForTesting
+    @NonNull
     public byte[] mHardwareAddress;
     @VisibleForTesting
     public ReceiveThread mReceiveThread;
@@ -323,6 +326,10 @@ public class ApfFilter implements AndroidPacketFilter {
     // The subnet prefix length of our IPv4 network. Only valid if mIPv4Address is not null.
     @GuardedBy("this")
     private int mIPv4PrefixLength;
+
+    // Our IPv6 addresses
+    @GuardedBy("this")
+    private Set<Inet6Address> mIPv6Addresses = new ArraySet<>();
 
     // Whether CLAT is enabled.
     @GuardedBy("this")
@@ -1559,7 +1566,7 @@ public class ApfFilter implements AndroidPacketFilter {
                     Counter.DROPPED_ARP_OTHER_HOST);
 
             ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
-            if (mHardwareAddress != null && v6Gen != null) {
+            if (v6Gen != null) {
                 // Ethernet requires that all packets be at least 60 bytes long
                 v6Gen.addAllocate(60)
                         .addPacketCopy(ETHER_SRC_ADDR_OFFSET, ETHER_ADDR_LEN)
@@ -1812,7 +1819,6 @@ public class ApfFilter implements AndroidPacketFilter {
         final String skipMdnsFilter = "skip_mdns_filter";
         final String checkMdnsUdpPort = "check_mdns_udp_port";
         final String mDnsAcceptPacket = "mdns_accept_packet";
-        final String mDnsDropPacket = "mdns_drop_packet";
 
         // Only turn on the filter if multicast filter is on and the qname allowlist is non-empty.
         if (!mMulticastFilter || mMdnsAllowList.isEmpty()) {
@@ -1888,23 +1894,27 @@ public class ApfFilter implements AndroidPacketFilter {
         gen.addLoadImmediate(R0, MDNS_QNAME_OFFSET);
         gen.addAddR1ToR0();
 
+        ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
+
         // Check first QNAME against allowlist
         for (int i = 0; i < mMdnsAllowList.size(); ++i) {
-            final String mDnsNextAllowedQnameCheck = "mdns_next_allowed_qname_check" + i;
             final byte[] encodedQname = encodeQname(mMdnsAllowList.get(i));
-            gen.addJumpIfBytesAtR0NotEqual(encodedQname, mDnsNextAllowedQnameCheck);
-            // QNAME matched
-            gen.addJump(mDnsAcceptPacket);
-            // QNAME not matched
-            gen.defineLabel(mDnsNextAllowedQnameCheck);
+            if (v6Gen != null) {
+                v6Gen.addJumpIfBytesAtR0Equal(encodedQname, mDnsAcceptPacket);
+            } else {
+                final String mDnsNextAllowedQnameCheck = "mdns_next_allowed_qname_check" + i;
+                gen.addJumpIfBytesAtR0NotEqual(encodedQname, mDnsNextAllowedQnameCheck);
+                // QNAME matched
+                gen.addJump(mDnsAcceptPacket);
+                // QNAME not matched
+                gen.defineLabel(mDnsNextAllowedQnameCheck);
+            }
         }
         // If QNAME doesn't match any entries in allowlist, drop the packet.
-        gen.defineLabel(mDnsDropPacket);
         gen.addCountAndDrop(Counter.DROPPED_MDNS);
 
         gen.defineLabel(mDnsAcceptPacket);
         gen.addCountAndPass(Counter.PASSED_MDNS);
-
 
         gen.defineLabel(skipMdnsFilter);
     }
@@ -1974,7 +1984,7 @@ public class ApfFilter implements AndroidPacketFilter {
         ApfV4GeneratorBase<?> gen;
         if (SdkLevel.isAtLeastV()
                 && ApfV6Generator.supportsVersion(mApfCapabilities.apfVersionSupported)) {
-            gen = new ApfV6Generator();
+            gen = new ApfV6Generator(mApfCapabilities.maximumApfProgramSize);
         } else {
             gen = new ApfV4Generator(mApfCapabilities.apfVersionSupported);
         }
@@ -2361,8 +2371,8 @@ public class ApfFilter implements AndroidPacketFilter {
         return mInDozeMode;
     }
 
-    /** Find the single IPv4 LinkAddress if there is one, otherwise return null. */
-    private static LinkAddress findIPv4LinkAddress(LinkProperties lp) {
+    /** Retrieve the single IPv4 LinkAddress if there is one, otherwise return null. */
+    private static LinkAddress retrieveIPv4LinkAddress(LinkProperties lp) {
         LinkAddress ipv4Address = null;
         for (LinkAddress address : lp.getLinkAddresses()) {
             if (!(address.getAddress() instanceof Inet4Address)) {
@@ -2377,16 +2387,38 @@ public class ApfFilter implements AndroidPacketFilter {
         return ipv4Address;
     }
 
+    /** Retrieve the IPv6 LinkAddress list, otherwise return empty list. */
+    private static Set<Inet6Address> retrieveIPv6LinkAddress(LinkProperties lp) {
+        final Set<Inet6Address> ipv6Addresses = new ArraySet<>();
+
+        for (LinkAddress address : lp.getLinkAddresses()) {
+            if (!(address.getAddress() instanceof Inet6Address)) {
+                continue;
+            }
+
+            ipv6Addresses.add((Inet6Address) address.getAddress());
+        }
+
+        return ipv6Addresses;
+    }
+
     public synchronized void setLinkProperties(LinkProperties lp) {
         // NOTE: Do not keep a copy of LinkProperties as it would further duplicate state.
-        final LinkAddress ipv4Address = findIPv4LinkAddress(lp);
+        final LinkAddress ipv4Address = retrieveIPv4LinkAddress(lp);
         final byte[] addr = (ipv4Address != null) ? ipv4Address.getAddress().getAddress() : null;
         final int prefix = (ipv4Address != null) ? ipv4Address.getPrefixLength() : 0;
-        if ((prefix == mIPv4PrefixLength) && Arrays.equals(addr, mIPv4Address)) {
+        final Set<Inet6Address> ipv6Addresses = retrieveIPv6LinkAddress(lp);
+
+        if ((prefix == mIPv4PrefixLength)
+                && Arrays.equals(addr, mIPv4Address)
+                && ipv6Addresses.equals(mIPv6Addresses)
+        ) {
             return;
         }
         mIPv4Address = addr;
         mIPv4PrefixLength = prefix;
+        mIPv6Addresses = ipv6Addresses;
+
         installNewProgramLocked();
     }
 
@@ -2462,6 +2494,12 @@ public class ApfFilter implements AndroidPacketFilter {
         pw.println("Minimum RDNSS lifetime: " + mMinRdnssLifetimeSec);
         try {
             pw.println("IPv4 address: " + InetAddress.getByAddress(mIPv4Address).getHostAddress());
+            pw.println("IPv6 addresses: ");
+            pw.increaseIndent();
+            for (Inet6Address addr: mIPv6Addresses) {
+                pw.println(addr.getHostAddress());
+            }
+            pw.decreaseIndent();
         } catch (UnknownHostException|NullPointerException e) {}
 
         if (mLastTimeInstalledProgram == 0) {

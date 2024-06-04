@@ -15,10 +15,16 @@
  */
 package android.net.apf;
 
+import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
 
+import android.annotation.NonNull;
+
 import com.android.internal.annotations.VisibleForTesting;
+
+import java.util.List;
+import java.util.Set;
 
 /**
  * APFv4 assembler/generator. A tool for generating an APFv4 program.
@@ -73,8 +79,8 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     }
 
     @Override
-    void addArithR1(Opcodes opcode) {
-        append(new Instruction(opcode, R1));
+    void addR0ArithR1(Opcodes opcode) {
+        append(new Instruction(opcode, Rbit1));  // APFv2/4: R0 op= R1
     }
 
     /**
@@ -88,7 +94,7 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndPass(ApfCounterTracker.Counter counter) {
         checkPassCounterRange(counter);
-        return maybeAddLoadR1CounterOffset(counter).addJump(mCountAndPassLabel);
+        return maybeAddLoadCounterOffset(R1, counter).addJump(mCountAndPassLabel);
     }
 
     /**
@@ -102,31 +108,43 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndDrop(ApfCounterTracker.Counter counter) {
         checkDropCounterRange(counter);
-        return maybeAddLoadR1CounterOffset(counter).addJump(mCountAndDropLabel);
+        return maybeAddLoadCounterOffset(R1, counter).addJump(mCountAndDropLabel);
     }
 
     @Override
     public ApfV4Generator addCountAndDropIfR0Equals(long val, ApfCounterTracker.Counter cnt) {
         checkDropCounterRange(cnt);
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0Equals(val, mCountAndDropLabel);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0Equals(val, mCountAndDropLabel);
     }
 
     @Override
     public ApfV4Generator addCountAndPassIfR0Equals(long val, ApfCounterTracker.Counter cnt) {
         checkPassCounterRange(cnt);
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0Equals(val, mCountAndPassLabel);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0Equals(val, mCountAndPassLabel);
     }
 
     @Override
     public ApfV4Generator addCountAndDropIfR0NotEquals(long val, ApfCounterTracker.Counter cnt) {
         checkDropCounterRange(cnt);
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0NotEquals(val, mCountAndDropLabel);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0NotEquals(val, mCountAndDropLabel);
     }
 
     @Override
     public ApfV4Generator addCountAndPassIfR0NotEquals(long val, ApfCounterTracker.Counter cnt) {
         checkPassCounterRange(cnt);
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0NotEquals(val, mCountAndPassLabel);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0NotEquals(val, mCountAndPassLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt) {
+        checkDropCounterRange(cnt);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0AnyBitsSet(val, mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt) {
+        checkPassCounterRange(cnt);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0AnyBitsSet(val, mCountAndPassLabel);
     }
 
     @Override
@@ -135,7 +153,7 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
         if (val <= 0) {
             throw new IllegalArgumentException("val must > 0, current val: " + val);
         }
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0LessThan(val, mCountAndDropLabel);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0LessThan(val, mCountAndDropLabel);
     }
 
     @Override
@@ -144,14 +162,14 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
         if (val <= 0) {
             throw new IllegalArgumentException("val must > 0, current val: " + val);
         }
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0LessThan(val, mCountAndPassLabel);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0LessThan(val, mCountAndPassLabel);
     }
 
     @Override
     public ApfV4Generator addCountAndDropIfBytesAtR0NotEqual(byte[] bytes,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
         checkDropCounterRange(cnt);
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfBytesAtR0NotEqual(bytes,
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfBytesAtR0NotEqual(bytes,
                 mCountAndDropLabel);
     }
 
@@ -159,8 +177,112 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     public ApfV4Generator addCountAndPassIfBytesAtR0NotEqual(byte[] bytes,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
         checkPassCounterRange(cnt);
-        return maybeAddLoadR1CounterOffset(cnt).addJumpIfBytesAtR0NotEqual(bytes,
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfBytesAtR0NotEqual(bytes,
                 mCountAndPassLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        maybeAddLoadCounterOffset(R1, cnt);
+        for (Long v : values) {
+            addJumpIfR0Equals(v, mCountAndPassLabel);
+        }
+        return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        maybeAddLoadCounterOffset(R1, cnt);
+        for (Long v : values) {
+            addJumpIfR0Equals(v, mCountAndDropLabel);
+        }
+        return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        String tgt = getUniqueLabel();
+        for (Long v : values) {
+            addJumpIfR0Equals(v, tgt);
+        }
+        addCountAndPass(cnt);
+        defineLabel(tgt);
+        return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        String tgt = getUniqueLabel();
+        for (Long v : values) {
+            addJumpIfR0Equals(v, tgt);
+        }
+        addCountAndDrop(cnt);
+        defineLabel(tgt);
+        return this;
+    }
+
+    private ApfV4Generator addCountAndDropOrPassByMatchingBytesAtR0(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt, boolean matchAny, boolean drop)
+            throws IllegalInstructionException {
+        final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
+        maybeAddLoadCounterOffset(R1, cnt);
+        String matchLabel = getUniqueLabel();
+        String allNoMatchLabel = getUniqueLabel();
+        for (byte[] v : deduplicatedList) {
+            String notMatchLabel = getUniqueLabel();
+            addJumpIfBytesAtR0NotEqual(v, notMatchLabel);
+            addJump(matchLabel);
+            defineLabel(notMatchLabel);
+        }
+        if (matchAny) {
+            addJump(allNoMatchLabel);
+            defineLabel(matchLabel);
+        }
+        if (drop) {
+            addCountAndDrop(cnt);
+        } else {
+            addCountAndPass(cnt);
+        }
+        if (matchAny) {
+            defineLabel(allNoMatchLabel);
+        } else {
+            defineLabel(matchLabel);
+        }
+        return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, true /* matchAny */,
+                true /* drop */);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, true /* matchAny */,
+                false /* drop */);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, false /* matchAny */,
+                true /* drop */);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, false /* matchAny */,
+                false /* drop */);
     }
 
     /**
@@ -224,12 +346,14 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
                 .addJump(DROP_LABEL);
     }
 
+    /**
+     * This function is no-op in APFv4
+     */
+    @Override
+    void updateExceptionBufferSize(int programSize) { }
+
     private ApfV4Generator maybeAddLoadCounterOffset(Register reg, ApfCounterTracker.Counter cnt) {
         if (mVersion < 4) return self();
         return addLoadImmediate(reg, cnt.offset());
-    }
-
-    private ApfV4Generator maybeAddLoadR1CounterOffset(ApfCounterTracker.Counter counter) {
-        return maybeAddLoadCounterOffset(R1, counter);
     }
 }
