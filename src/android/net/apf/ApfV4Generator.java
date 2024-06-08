@@ -166,6 +166,26 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     }
 
     @Override
+    public ApfV4Generator addCountAndDropIfR0GreaterThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        if (val < 0 || val >= 4294967295L) {
+            throw new IllegalArgumentException("val must >= 0 and < 2^32-1, current val: " + val);
+        }
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0GreaterThan(val, mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0GreaterThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        if (val < 0 || val >= 4294967295L) {
+            throw new IllegalArgumentException("val must >= 0 and < 2^32-1, current val: " + val);
+        }
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0GreaterThan(val, mCountAndPassLabel);
+    }
+
+    @Override
     public ApfV4Generator addCountAndDropIfBytesAtR0NotEqual(byte[] bytes,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
         checkDropCounterRange(cnt);
@@ -184,6 +204,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndPassIfR0IsOneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         checkPassCounterRange(cnt);
         maybeAddLoadCounterOffset(R1, cnt);
         for (Long v : values) {
@@ -195,6 +218,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndDropIfR0IsOneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         checkDropCounterRange(cnt);
         maybeAddLoadCounterOffset(R1, cnt);
         for (Long v : values) {
@@ -206,6 +232,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndPassIfR0IsNoneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         String tgt = getUniqueLabel();
         for (Long v : values) {
             addJumpIfR0Equals(v, tgt);
@@ -218,6 +247,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         String tgt = getUniqueLabel();
         for (Long v : values) {
             addJumpIfR0Equals(v, tgt);
