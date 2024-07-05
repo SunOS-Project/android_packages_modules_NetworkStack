@@ -16,27 +16,38 @@
 package android.net.apf
 
 import android.content.Context
-import android.net.InetAddresses
 import android.net.LinkAddress
 import android.net.LinkProperties
+import android.net.MacAddress
 import android.net.apf.ApfCounterTracker.Counter
 import android.net.apf.ApfCounterTracker.Counter.APF_PROGRAM_ID
 import android.net.apf.ApfCounterTracker.Counter.APF_VERSION
+import android.net.apf.ApfCounterTracker.Counter.CORRUPT_DNS_PACKET
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_ARP_REQUEST_REPLIED
-import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_DENYLISTED
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETH_BROADCAST
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NON_DHCP4
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
+import android.net.apf.ApfCounterTracker.Counter.PASSED_ALLOCATE_FAILURE
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP
+import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
+import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4
+import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4_FROM_DHCPV4_SERVER
+import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_ICMP
+import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_MULTIPLE_OPTIONS
+import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRESS
+import android.net.apf.ApfCounterTracker.Counter.PASSED_TRANSMIT_FAILURE
 import android.net.apf.ApfCounterTracker.Counter.TOTAL_PACKETS
 import android.net.apf.ApfFilter.Dependencies
 import android.net.apf.ApfTestUtils.DROP
 import android.net.apf.ApfTestUtils.MIN_PKT_SIZE
 import android.net.apf.ApfTestUtils.PASS
-import android.net.apf.ApfTestUtils.TestApfFilter
 import android.net.apf.ApfTestUtils.assertDrop
 import android.net.apf.ApfTestUtils.assertPass
 import android.net.apf.ApfTestUtils.assertVerdict
 import android.net.apf.BaseApfGenerator.APF_VERSION_2
-import android.net.apf.BaseApfGenerator.APF_VERSION_4
+import android.net.apf.BaseApfGenerator.APF_VERSION_3
 import android.net.apf.BaseApfGenerator.APF_VERSION_6
 import android.net.apf.BaseApfGenerator.DROP_LABEL
 import android.net.apf.BaseApfGenerator.IllegalInstructionException
@@ -44,10 +55,13 @@ import android.net.apf.BaseApfGenerator.MemorySlot
 import android.net.apf.BaseApfGenerator.PASS_LABEL
 import android.net.apf.BaseApfGenerator.Register.R0
 import android.net.apf.BaseApfGenerator.Register.R1
+import android.net.ip.IpClient.IpClientCallbacksWrapper
 import android.os.Build
 import android.system.OsConstants.ARPHRD_ETHER
+import android.system.OsConstants.IFA_F_TENTATIVE
 import androidx.test.filters.SmallTest
 import com.android.net.module.util.HexDump
+import com.android.net.module.util.InterfaceParams
 import com.android.net.module.util.NetworkStackConstants.ARP_ETHER_IPV4_LEN
 import com.android.net.module.util.NetworkStackConstants.ARP_REPLY
 import com.android.net.module.util.NetworkStackConstants.ARP_REQUEST
@@ -60,7 +74,6 @@ import com.android.networkstack.metrics.NetworkQuirkMetrics
 import com.android.testutils.DevSdkIgnoreRule
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
-import java.net.Inet6Address
 import java.net.InetAddress
 import java.nio.ByteBuffer
 import kotlin.test.assertContentEquals
@@ -71,9 +84,18 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.ArgumentCaptor
+import org.mockito.ArgumentMatchers.any
 import org.mockito.Mock
 import org.mockito.Mockito
+import org.mockito.Mockito.times
+import org.mockito.Mockito.verify
+import org.mockito.Mockito.`when`
 import org.mockito.MockitoAnnotations
+
+const val ETH_HLEN = 14
+const val IPV4_HLEN = 20
+const val IPPROTO_UDP = 17
 
 /**
  * Tests for APF instructions.
@@ -82,36 +104,73 @@ import org.mockito.MockitoAnnotations
 @SmallTest
 class ApfNewTest {
 
-    @get:Rule
-    val ignoreRule = DevSdkIgnoreRule()
+    @get:Rule val ignoreRule = DevSdkIgnoreRule()
 
-    @Mock
-    private lateinit var context: Context
+    @Mock private lateinit var context: Context
 
-    @Mock
-    private lateinit var metrics: NetworkQuirkMetrics
+    @Mock private lateinit var metrics: NetworkQuirkMetrics
 
-    @Mock
-    private lateinit var dependencies: Dependencies
+    @Mock private lateinit var dependencies: Dependencies
+
+    @Mock private lateinit var ipClientCallback: IpClientCallbacksWrapper
 
     private val defaultMaximumApfProgramSize = 2048
 
-    private val testPacket = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8,
-                                         9, 10, 11, 12, 13, 14, 15, 16)
+    private val loInterfaceParams = InterfaceParams.getByName("lo")
+
+    private val ifParams =
+        InterfaceParams(
+            "lo",
+            loInterfaceParams.index,
+            MacAddress.fromBytes(byteArrayOf(2, 3, 4, 5, 6, 7)),
+            loInterfaceParams.defaultMtu
+        )
+
+    private val testPacket = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
     private val hostIpv4Address = byteArrayOf(10, 0, 0, 1)
     private val senderIpv4Address = byteArrayOf(10, 0, 0, 2)
     private val arpBroadcastMacAddress = intArrayOf(0xff, 0xff, 0xff, 0xff, 0xff, 0xff)
             .map { it.toByte() }.toByteArray()
     private val senderMacAddress = intArrayOf(0x01, 0x22, 0x33, 0x44, 0x55, 0x66)
-            .map { it.toByte() }.toByteArray()
-    private val hostIpv6AddressList = listOf(
-        InetAddresses.parseNumericAddress("2001::200:1a:3344:1122") as Inet6Address,
-        InetAddresses.parseNumericAddress("2001::100:1b:4455:6677") as Inet6Address
+        .map { it.toByte() }.toByteArray()
+    private val hostIpv6Addresses = listOf(
+        // 2001::200:1a:3344:1122
+        intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0x1a, 0x33, 0x44, 0x11, 0x22)
+            .map{ it.toByte() }.toByteArray(),
+        // 2001::100:1b:4455:6677
+        intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 0, 0, 0x1b, 0x44, 0x55, 0x66, 0x77)
+            .map{ it.toByte() }.toByteArray()
     )
-
+    private val hostIpv6TentativeAddresses = listOf(
+        // 2001::200:1a:1234:5678
+        intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0x1a, 0x12, 0x34, 0x56, 0x78)
+            .map{ it.toByte() }.toByteArray(),
+        // 2001::100:1b:1234:5678
+        intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 0, 0, 0x1b, 0x12, 0x34, 0x56, 0x78)
+            .map{ it.toByte() }.toByteArray()
+    )
+    private val hostAnycast6Addresses = listOf(
+        // 2001::100:1b:aabb:ccdd
+        intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 0, 0, 0x1b, 0xaa, 0xbb, 0xcc, 0xdd)
+            .map{ it.toByte() }.toByteArray()
+    )
+    private val hostMulticastMacAddresses = listOf(
+            // 33:33:00:00:00:01
+            intArrayOf(0x33, 0x33, 0, 0, 0, 1).map { it.toByte() }.toByteArray(),
+            // 33:33:ff:44:11:22
+            intArrayOf(0x33, 0x33, 0xff, 0x44, 0x11, 0x22).map { it.toByte() }.toByteArray(),
+            // 33:33:ff:55:66:77
+            intArrayOf(0x33, 0x33, 0xff, 0x55, 0x66, 0x77).map { it.toByte() }.toByteArray(),
+            // 33:33:ff:bb:cc:dd
+            intArrayOf(0x33, 0x33, 0xff, 0xbb, 0xcc, 0xdd).map { it.toByte() }.toByteArray(),
+    )
     @Before
     fun setUp() {
         MockitoAnnotations.initMocks(this)
+        // mock anycast6 address from /proc/net/anycast6
+        `when`(dependencies.getAnycast6Addresses(any())).thenReturn(hostAnycast6Addresses)
+        // mock host mac address and ethernet multicast addresses from /proc/net/dev_mcast
+        `when`(dependencies.getEtherMulticastAddresses(any())).thenReturn(hostMulticastMacAddresses)
     }
 
     @After
@@ -308,7 +367,19 @@ class ApfNewTest {
             gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
         }
         assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0GreaterThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0GreaterThan(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
             gen.addCountAndDropIfBytesAtR0NotEqual(byteArrayOf(1), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfBytesAtR0Equal(byteArrayOf(1), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfBytesAtR0Equal(byteArrayOf(1), DROPPED_ETH_BROADCAST)
         }
         assertFailsWith<IllegalArgumentException> {
             gen.addCountAndDropIfR0AnyBitsSet(3, PASSED_ARP)
@@ -368,7 +439,7 @@ class ApfNewTest {
             )
         }
 
-        val v4gen = ApfV4Generator(APF_VERSION_4)
+        val v4gen = ApfV4Generator(APF_VERSION_3)
         assertFailsWith<IllegalArgumentException> { v4gen.addCountAndDrop(PASSED_ARP) }
         assertFailsWith<IllegalArgumentException> { v4gen.addCountAndPass(DROPPED_ETH_BROADCAST) }
         assertFailsWith<IllegalArgumentException> {
@@ -384,10 +455,22 @@ class ApfNewTest {
             v4gen.addCountAndPassIfR0NotEquals(3, DROPPED_ETH_BROADCAST)
         }
         assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfBytesAtR0Equal(byteArrayOf(1), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfBytesAtR0Equal(byteArrayOf(1), DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndDropIfR0LessThan(3, PASSED_ARP)
         }
         assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0GreaterThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0GreaterThan(3, DROPPED_ETH_BROADCAST)
         }
         assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndDropIfBytesAtR0NotEqual(byteArrayOf(1), PASSED_ARP)
@@ -522,18 +605,18 @@ class ApfNewTest {
         )
 
         gen = ApfV6Generator(defaultMaximumApfProgramSize)
-        gen.addCountAndDrop(DROPPED_ETHERTYPE_DENYLISTED)
+        gen.addCountAndDrop(DROPPED_ETHERTYPE_NOT_ALLOWED)
         program = gen.generate().skipDataAndDebug()
         // encoding COUNT(DROP) opcode: opcode=0, imm_len=size_of(imm), R=1, imm=counterNumber
         assertContentEquals(
                 byteArrayOf(
                         encodeInstruction(opcode = 0, immLength = 1, register = 1),
-                        DROPPED_ETHERTYPE_DENYLISTED.value().toByte()
+                        DROPPED_ETHERTYPE_NOT_ALLOWED.value().toByte()
                 ),
                 program
         )
         assertContentEquals(
-                listOf("0: drop        counter=37"),
+                listOf("0: drop        counter=43"),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
 
@@ -582,14 +665,14 @@ class ApfNewTest {
                 byteArrayOf(
                         encodeInstruction(opcode = 14, immLength = 2, register = 1), 1, 0
                 ) + largeByteArray + byteArrayOf(
-                        encodeInstruction(opcode = 21, immLength = 1, register = 0), 48, 6, 49
+                        encodeInstruction(opcode = 21, immLength = 1, register = 0), 48, 6, 25
                 ),
                 program
         )
         assertContentEquals(
                 listOf(
                         "0: data        256, " + "01".repeat(256),
-                        "259: debugbuf    size=1585"
+                        "259: debugbuf    size=1561"
                 ),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
@@ -875,7 +958,7 @@ class ApfNewTest {
                 .generate()
         assertContentEquals(listOf(
                 "0: data        9, 112233445566778899",
-                "12: debugbuf    size=1812",
+                "12: debugbuf    size=1788",
                 "16: allocate    18",
                 "20: datacopy    src=3, len=6",
                 "23: datacopy    src=4, len=3",
@@ -896,34 +979,22 @@ class ApfNewTest {
                 .generate()
         assertDrop(APF_VERSION_6, program, testPacket)
 
-        var dataRegion = ByteArray(Counter.totalSize()) { 0 }
         program = ApfV6Generator(defaultMaximumApfProgramSize)
                 .addCountAndDrop(Counter.DROPPED_ETH_BROADCAST)
                 .generate()
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        var counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.DROPPED_ETH_BROADCAST to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, DROPPED_ETH_BROADCAST)
 
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
         program = ApfV6Generator(defaultMaximumApfProgramSize)
                 .addCountAndPass(Counter.PASSED_ARP)
                 .generate()
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.PASSED_ARP to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP)
     }
 
     @Test
     fun testLoadStoreCounter() {
         doTestLoadStoreCounter (
                 { mutableMapOf() },
-                { ApfV4Generator(APF_VERSION_4) }
+                { ApfV4Generator(APF_VERSION_3) }
         )
         doTestLoadStoreCounter (
                 { mutableMapOf(TOTAL_PACKETS to 1) },
@@ -950,22 +1021,22 @@ class ApfNewTest {
     @Test
     fun testV4CountAndPassDropCompareR0() {
         doTestCountAndPassDropCompareR0(
-                { mutableMapOf() },
-                { ApfV4Generator(APF_VERSION_4) }
+                getGenerator = { ApfV4Generator(APF_VERSION_3) },
+                incTotal = false
         )
     }
 
     @Test
     fun testV6CountAndPassDropCompareR0() {
         doTestCountAndPassDropCompareR0(
-                { mutableMapOf(Counter.TOTAL_PACKETS to 1) },
-                { ApfV6Generator(defaultMaximumApfProgramSize) }
+                getGenerator = { ApfV6Generator(defaultMaximumApfProgramSize) },
+                incTotal = true
         )
     }
 
     private fun doTestCountAndPassDropCompareR0(
-            getInitialMap: () -> MutableMap<Counter, Long>,
-            getGenerator: () -> ApfV4GeneratorBase<*>
+            getGenerator: () -> ApfV4GeneratorBase<*>,
+            incTotal: Boolean
     ) {
         var program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -973,12 +1044,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        var dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        var counterMap = decodeCountersIntoMap(dataRegion)
-        var expectedMap = getInitialMap()
-        expectedMap[Counter.DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -986,12 +1058,7 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[Counter.PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -999,12 +1066,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[Counter.DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -1012,12 +1080,7 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[Counter.PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -1025,12 +1088,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[Counter.DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -1038,12 +1102,29 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[Counter.PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0GreaterThan(122, Counter.DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0GreaterThan(122, Counter.PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 1)
@@ -1052,12 +1133,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 1)
@@ -1066,12 +1148,7 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 1)
@@ -1079,12 +1156,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 1)
@@ -1092,12 +1170,51 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0IsOneOf(setOf(123), DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0IsOneOf(setOf(123), PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0IsNoneOf(setOf(124), DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0IsNoneOf(setOf(124), PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -1105,12 +1222,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -1118,12 +1236,7 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -1131,12 +1244,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
@@ -1144,12 +1258,7 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 0)
@@ -1160,12 +1269,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 0)
@@ -1176,12 +1286,7 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
 
         program = getGenerator()
                 .addLoadImmediate(R0, 0)
@@ -1192,12 +1297,13 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[DROPPED_ETH_BROADCAST] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
 
         program = getGenerator()
                 .addLoadImmediate(R0, 0)
@@ -1208,37 +1314,115 @@ class ApfNewTest {
                 .addPass()
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        expectedMap = getInitialMap()
-        expectedMap[PASSED_ARP] = 1
-        assertEquals(expectedMap, counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 1)
+                .addCountAndDropIfBytesAtR0Equal(
+                        byteArrayOf(2, 3), DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 1)
+                .addCountAndPassIfBytesAtR0Equal(
+                        byteArrayOf(2, 3), PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
+    }
+
+    private fun doTestEtherTypeAllowListFilter(apfVersion: Int) {
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        val apfFilter =
+            ApfFilter(
+                context,
+                getDefaultConfig(apfVersion),
+                ifParams,
+                ipClientCallback,
+                metrics,
+                dependencies
+            )
+        verify(ipClientCallback, times(2)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.allValues.last()
+
+        // Using scapy to generate IPv4 mDNS packet:
+        //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
+        //   ip = IP(src="192.168.1.1")
+        //   udp = UDP(sport=5353, dport=5353)
+        //   dns = DNS(qd=DNSQR(qtype="PTR", qname="a.local"))
+        //   p = eth/ip/udp/dns
+        val mdnsPkt = "01005e0000fbe89f806660bb080045000035000100004011d812c0a80101e00000f" +
+                      "b14e914e900214d970000010000010000000000000161056c6f63616c00000c0001"
+        verifyProgramRun(APF_VERSION_6, program, HexDump.hexStringToByteArray(mdnsPkt), PASSED_IPV4)
+
+        // Using scapy to generate RA packet:
+        //  eth = Ether(src="E8:9F:80:66:60:BB", dst="33:33:00:00:00:01")
+        //  ip6 = IPv6(src="fe80::1", dst="ff02::1")
+        //  icmp6 = ICMPv6ND_RA(routerlifetime=3600, retranstimer=3600)
+        //  p = eth/ip6/icmp6
+        val raPkt = "333300000001e89f806660bb86dd6000000000103afffe800000000000000000000000" +
+                    "000001ff0200000000000000000000000000018600600700080e100000000000000e10"
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(raPkt),
+                PASSED_IPV6_ICMP
+        )
+
+        // Using scapy to generate ethernet packet with type 0x88A2:
+        //  p = Ether(type=0x88A2)/Raw(load="01")
+        val ethPkt = "ffffffffffff047bcb463fb588a23031"
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(ethPkt),
+                DROPPED_ETHERTYPE_NOT_ALLOWED
+        )
+
+        apfFilter.shutdown()
+    }
+
+    @Test
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    fun testV4EtherTypeAllowListFilter() {
+        doTestEtherTypeAllowListFilter(APF_VERSION_3)
+    }
+
+    @Test
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    fun testV6EtherTypeAllowListFilter() {
+        doTestEtherTypeAllowListFilter(APF_VERSION_6)
     }
 
     @Test
     fun testV4CountAndPassDrop() {
-        var program = ApfV4Generator(APF_VERSION_4)
+        var program = ApfV4Generator(APF_VERSION_3)
                 .addCountAndDrop(Counter.DROPPED_ETH_BROADCAST)
                 .addCountTrampoline()
                 .generate()
-        var dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
-        var counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.DROPPED_ETH_BROADCAST to 1
-        ), counterMap)
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = false
+        )
 
-        program = ApfV4Generator(APF_VERSION_4)
+        program = ApfV4Generator(APF_VERSION_3)
                 .addCountAndPass(Counter.PASSED_ARP)
                 .addCountTrampoline()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.PASSED_ARP to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = false)
     }
 
     @Test
@@ -1267,13 +1451,7 @@ class ApfNewTest {
                 .addAllocate(65535)
                 .addDrop()
                 .generate()
-        val dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        val counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.PASSED_ALLOCATE_FAILURE to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ALLOCATE_FAILURE)
     }
 
     @Test
@@ -1286,13 +1464,7 @@ class ApfNewTest {
                 .addTransmitWithoutChecksum()
                 .addDrop()
                 .generate()
-        val dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
-        val counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.PASSED_TRANSMIT_FAILURE to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_TRANSMIT_FAILURE)
     }
 
     @Test
@@ -1414,26 +1586,14 @@ class ApfNewTest {
                 .addJumpIfPktAtR0ContainDnsQ(needlesMatch, 0x01, DROP_LABEL) // arg2=qtype
                 .addPass()
                 .generate()
-        var dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, badUdpPayload, dataRegion)
-        var counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.CORRUPT_DNS_PACKET to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, badUdpPayload, CORRUPT_DNS_PACKET, result = DROP)
 
         program = ApfV6Generator(defaultMaximumApfProgramSize)
                 .addLoadImmediate(R0, 0)
                 .addJumpIfPktAtR0ContainDnsQSafe(needlesMatch, 0x01, DROP_LABEL) // arg2=qtype
                 .addPass()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, badUdpPayload, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.CORRUPT_DNS_PACKET to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, badUdpPayload, CORRUPT_DNS_PACKET, result = PASS)
     }
 
     @Test
@@ -1519,26 +1679,14 @@ class ApfNewTest {
                 .addJumpIfPktAtR0ContainDnsA(needlesMatch, DROP_LABEL)
                 .addPass()
                 .generate()
-        var dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, badUdpPayload, dataRegion)
-        var counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.CORRUPT_DNS_PACKET to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, badUdpPayload, CORRUPT_DNS_PACKET, result = DROP)
 
         program = ApfV6Generator(defaultMaximumApfProgramSize)
                 .addLoadImmediate(R0, 0)
                 .addJumpIfPktAtR0ContainDnsASafe(needlesMatch, DROP_LABEL)
                 .addPass()
                 .generate()
-        dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, PASS, program, badUdpPayload, dataRegion)
-        counterMap = decodeCountersIntoMap(dataRegion)
-        assertEquals(mapOf<Counter, Long>(
-                Counter.TOTAL_PACKETS to 1,
-                Counter.CORRUPT_DNS_PACKET to 1
-        ), counterMap)
+        verifyProgramRun(APF_VERSION_6, program, badUdpPayload, CORRUPT_DNS_PACKET, result = PASS)
     }
 
     @Test
@@ -1634,24 +1782,110 @@ class ApfNewTest {
         assertEquals(1, dataRegion[3])
     }
 
-    // The APFv6 code path is only turned on in V+
-    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
-    fun testArpTransmit() {
-        val ipClientCallback = ApfTestUtils.MockIpClientCallback()
-        val apfFilter = TestApfFilter(
+    fun testIPv4PacketFilterOnV6OnlyNetwork() {
+        val apfFilter =
+            ApfFilter(
                 context,
                 getDefaultConfig(),
+                ifParams,
                 ipClientCallback,
                 metrics,
                 dependencies
         )
+        apfFilter.updateClatInterfaceState(true)
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(ipClientCallback, times(3)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.allValues.last()
+
+        // Using scapy to generate IPv4 mDNS packet:
+        //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
+        //   ip = IP(src="192.168.1.1")
+        //   udp = UDP(sport=5353, dport=5353)
+        //   dns = DNS(qd=DNSQR(qtype="PTR", qname="a.local"))
+        //   p = eth/ip/udp/dns
+        val mdnsPkt = "01005e0000fbe89f806660bb080045000035000100004011d812c0a80101e00000f" +
+                      "b14e914e900214d970000010000010000000000000161056c6f63616c00000c0001"
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(mdnsPkt),
+                DROPPED_IPV4_NON_DHCP4
+        )
+
+        // Using scapy to generate DHCP4 offer packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='ff:ff:ff:ff:ff:ff')
+        //   ip = IP(src='192.168.1.1', dst='255.255.255.255')
+        //   udp = UDP(sport=67, dport=68)
+        //   bootp = BOOTP(op=2,
+        //                 yiaddr='192.168.1.100',
+        //                 siaddr='192.168.1.1',
+        //                 chaddr=b'\x00\x11\x22\x33\x44\x55')
+        //   dhcp_options = [('message-type', 'offer'),
+        //                   ('server_id', '192.168.1.1'),
+        //                   ('subnet_mask', '255.255.255.0'),
+        //                   ('router', '192.168.1.1'),
+        //                   ('lease_time', 86400),
+        //                   ('name_server', '8.8.8.8'),
+        //                   'end']
+        //   dhcp = DHCP(options=dhcp_options)
+        //   dhcp_offer_packet = ether/ip/udp/bootp/dhcp
+        val dhcp4Pkt = "ffffffffffff00112233445508004500012e000100004011b815c0a80101ffffffff0043" +
+                       "0044011a5ffc02010600000000000000000000000000c0a80164c0a80101000000000011" +
+                       "223344550000000000000000000000000000000000000000000000000000000000000000" +
+                       "000000000000000000000000000000000000000000000000000000000000000000000000" +
+                       "000000000000000000000000000000000000000000000000000000000000000000000000" +
+                       "000000000000000000000000000000000000000000000000000000000000000000000000" +
+                       "000000000000000000000000000000000000000000000000000000000000000000000000" +
+                       "0000000000000000000000000000000000000000000000000000638253633501023604c0" +
+                       "a801010104ffffff000304c0a80101330400015180060408080808ff"
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(dhcp4Pkt),
+                PASSED_IPV4_FROM_DHCPV4_SERVER
+        )
+
+        // Using scapy to generate DHCP4 offer packet:
+        //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
+        //   ip = IP(src="192.168.1.10", dst="192.168.1.20")  # IPv4
+        //   udp = UDP(sport=12345, dport=53)
+        //   dns = DNS(qd=DNSQR(qtype="PTR", qname="a.local"))
+        //   pkt = eth / ip / udp / dns
+        //   fragments = fragment(pkt, fragsize=30)
+        //   fragments[1]
+        val fragmentedUdpPkt = "01005e0000fbe89f806660bb08004500001d000100034011f75dc0a8010ac0a8" +
+                               "01146f63616c00000c0001"
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(fragmentedUdpPkt),
+                DROPPED_IPV4_NON_DHCP4
+        )
+        apfFilter.shutdown()
+    }
+
+    // The APFv6 code path is only turned on in V+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testArpTransmit() {
+        val apfFilter =
+            ApfFilter(
+                context,
+                getDefaultConfig(),
+                ifParams,
+                ipClientCallback,
+                metrics,
+                dependencies
+        )
+        verify(ipClientCallback, times(2)).installPacketFilter(any())
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
-        ipClientCallback.resetApfProgramWait()
         apfFilter.setLinkProperties(lp)
-        val program = ipClientCallback.assertProgramUpdateAndGet()
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(ipClientCallback, times(3)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.value
         val receivedArpPacketBuf = ArpPacket.buildArpPacket(
                 arpBroadcastMacAddress,
                 senderMacAddress,
@@ -1662,8 +1896,7 @@ class ApfNewTest {
         )
         val receivedArpPacket = ByteArray(ARP_ETHER_IPV4_LEN)
         receivedArpPacketBuf.get(receivedArpPacket)
-        val data = ByteArray(Counter.totalSize()) { 0 }
-        assertVerdict(APF_VERSION_6, DROP, program, receivedArpPacket, data)
+        verifyProgramRun(APF_VERSION_6, program, receivedArpPacket, DROPPED_ARP_REQUEST_REPLIED)
 
         val transmittedPacket = ApfJniUtils.getTransmittedPacket()
         val expectedArpReplyBuf = ArpPacket.buildArpPacket(
@@ -1680,54 +1913,417 @@ class ApfNewTest {
                 expectedArpReplyPacket + ByteArray(18) {0},
                 transmittedPacket
         )
-        assertEquals(
-                mapOf<Counter, Long>(
-                        TOTAL_PACKETS to 1,
-                        DROPPED_ARP_REQUEST_REPLIED to 1
-                ),
-                decodeCountersIntoMap(data)
+        apfFilter.shutdown()
+    }
+
+    @Test
+    fun testArpOffloadDisabled() {
+        val apfConfig = getDefaultConfig()
+        apfConfig.shouldHandleArpOffload = false
+        val apfFilter =
+            ApfFilter(
+                context,
+                apfConfig,
+                ifParams,
+                ipClientCallback,
+                metrics,
+                dependencies
+            )
+        verify(ipClientCallback, times(2)).installPacketFilter(any())
+        val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+        val lp = LinkProperties()
+        lp.addLinkAddress(linkAddress)
+        apfFilter.setLinkProperties(lp)
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(ipClientCallback, times(3)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.value
+        val receivedArpPacketBuf = ArpPacket.buildArpPacket(
+            arpBroadcastMacAddress,
+            senderMacAddress,
+            hostIpv4Address,
+            HexDump.hexStringToByteArray("000000000000"),
+            senderIpv4Address,
+            ARP_REQUEST.toShort()
         )
+        val receivedArpPacket = ByteArray(ARP_ETHER_IPV4_LEN)
+        receivedArpPacketBuf.get(receivedArpPacket)
+        verifyProgramRun(APF_VERSION_6, program, receivedArpPacket, PASSED_ARP_REQUEST)
+        apfFilter.shutdown()
+    }
+
+    @Test
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    fun testNsFilterNoIPv6() {
+        `when`(dependencies.getAnycast6Addresses(any())).thenReturn(listOf())
+        val apfFilter =
+            ApfFilter(
+                context,
+                getDefaultConfig(),
+                ifParams,
+                ipClientCallback,
+                metrics,
+                dependencies
+        )
+
+        // validate NS packet check when there is no IPv6 address
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(ipClientCallback, times(2)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.allValues.last()
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val nsPkt = "01020304050600010203040586DD6000000000183AFF200100000000000" +
+                    "00200001A1122334420010000000000000200001A334411228700452900" +
+                    "00000020010000000000000200001A33441122"
+        // when there is no IPv6 addresses -> pass NS packet
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(nsPkt),
+                PASSED_IPV6_NS_NO_ADDRESS
+        )
+
+        apfFilter.shutdown()
+    }
+
+    @Test
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    fun testNsFilter() {
+        val apfFilter =
+            ApfFilter(
+                context,
+                getDefaultConfig(),
+                ifParams,
+                ipClientCallback,
+                metrics,
+                dependencies
+        )
+        verify(ipClientCallback, times(2)).installPacketFilter(any())
+
+        // validate Ethernet dst address check
+
+        val lp = LinkProperties()
+        for (addr in hostIpv6Addresses) {
+            lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
+        }
+
+        apfFilter.setLinkProperties(lp)
+        verify(ipClientCallback, times(3)).installPacketFilter(any())
+        apfFilter.updateClatInterfaceState(true)
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(ipClientCallback, times(4)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.value
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="00:05:04:03:02:01")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val nonHostDstMacNsPkt = "00050403020100010203040586DD6000000000183AFF2001000000000000" +
+                                 "0200001A1122334420010000000000000200001A33441122870045290000" +
+                                 "000020010000000000000200001A33441122"
+        // invalid unicast ether dst -> pass
+        verifyProgramRun(
+            APF_VERSION_6,
+            program,
+            HexDump.hexStringToByteArray(nonHostDstMacNsPkt),
+            DROPPED_IPV6_NS_OTHER_HOST
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="33:33:ff:03:02:01")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val nonMcastDstMacNsPkt = "3333ff03020100010203040586DD6000000000183AFF2001000000000000" +
+                                  "0200001A1122334420010000000000000200001A33441122870045290000" +
+                                  "000020010000000000000200001A33441122"
+        // mcast dst mac is not one of solicited mcast mac derived from one of device's ip -> pass
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(nonMcastDstMacNsPkt),
+                DROPPED_IPV6_NS_OTHER_HOST
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="33:33:ff:44:11:22")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val hostMcastDstMacNsPkt = "3333ff44112200010203040586DD6000000000183AFF2001000000000000" +
+                                   "0200001A1122334420010000000000000200001A33441122870045290000" +
+                                   "000020010000000000000200001A33441122"
+        // mcast dst mac is one of solicited mcast mac derived from one of device's ip -> pass
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(hostMcastDstMacNsPkt),
+                PASSED_IPV6_ICMP
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="FF:FF:FF:FF:FF:FF")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val broadcastNsPkt = "FFFFFFFFFFFF00010203040586DD6000000000183AFF2001000000000000" +
+                             "0200001A1122334420010000000000000200001A33441122870045290000" +
+                             "000020010000000000000200001A33441122"
+        // mcast dst mac is broadcast address -> pass
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(broadcastNsPkt),
+                PASSED_IPV6_ICMP
+        )
+
+        // validate IPv6 dst address check
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val validHostDstIpNsPkt = "02030405060700010203040586DD6000000000183AFF200100000000000" +
+                                  "00200001A1122334420010000000000000200001A334411228700452900" +
+                                  "00000020010000000000000200001A33441122"
+        // dst ip is one of device's ip -> Pass
+        verifyProgramRun(
+            APF_VERSION_6,
+            program,
+            HexDump.hexStringToByteArray(validHostDstIpNsPkt),
+            PASSED_IPV6_ICMP
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::100:1b:aabb:ccdd", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::100:1b:aabb:ccdd")
+        // pkt = eth/ip6/icmp6
+        val validHostAnycastDstIpNsPkt = "02030405060700010203040586DD6000000000183AFF20010000" +
+                                         "000000000200001A1122334420010000000000000100001BAABB" +
+                                         "CCDD8700E0C00000000020010000000000000100001BAABBCCDD"
+        // dst ip is device's anycast address -> Pass
+        verifyProgramRun(
+            APF_VERSION_6,
+            program,
+            HexDump.hexStringToByteArray(validHostAnycastDstIpNsPkt),
+            PASSED_IPV6_ICMP
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:4444:5555", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val nonHostUcastDstIpNsPkt = "02030405060700010203040586DD6000000000183AFF200100000000" +
+                                     "00000200001A1122334420010000000000000200001A444455558700" +
+                                     "EFF50000000020010000000000000200001A33441122"
+        // unicast dst ip is not one of device's ip -> pass
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(nonHostUcastDstIpNsPkt),
+                DROPPED_IPV6_NS_OTHER_HOST
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="ff02::1:ff44:1133", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val nonHostMcastDstIpNsPkt = "02030405060700010203040586DD6000000000183AFF200100000000" +
+                                     "00000200001A11223344FF0200000000000000000001FF4411338700" +
+                                     "9C2E0000000020010000000000000200001A33441122"
+        // mcast dst ip is not one of solicited mcast ip derived from one of device's ip -> pass
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(nonHostMcastDstIpNsPkt),
+                DROPPED_IPV6_NS_OTHER_HOST
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="ff02::1:ff44:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // pkt = eth/ip6/icmp6
+        val hostMcastDstIpNsPkt = "02030405060700010203040586DD6000000000183AFF200100000000" +
+                                  "00000200001A11223344FF0200000000000000000001FF4411228700" +
+                                  "9C2E0000000020010000000000000200001A33441122"
+        // mcast dst ip is one of solicited mcast ip derived from one of device's ip -> pass
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(hostMcastDstIpNsPkt),
+                PASSED_IPV6_ICMP
+        )
+
+        // validate IPv6 NS payload check
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255, plen=20)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // icmp6_opt = ICMPv6NDOptSrcLLAddr(lladdr="01:02:03:04:05:06")
+        // pkt = eth/ip6/icmp6/icmp6_opt
+        val shortNsPkt = "02030405060700010203040586DD6000000000143AFF20010000000000000200001A1" +
+                         "122334420010000000000000200001A3344112287003B140000000020010000000000" +
+                         "000200001A334411220101010203040506"
+        // payload len < 24 -> drop
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(shortNsPkt),
+                DROPPED_IPV6_NS_INVALID
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // icmp6_opt_1 = ICMPv6NDOptSrcLLAddr(lladdr="01:02:03:04:05:06")
+        // icmp6_opt_2 = ICMPv6NDOptUnknown(type=14, len=6, data='\x11\x22\x33\x44\x55\x66')
+        // pkt = eth/ip6/icmp6/icmp6_opt_1/icmp6_opt_2
+        val longNsPkt = "02030405060700010203040586DD6000000000283AFF20010000000000000200001A11" +
+                        "22334420010000000000000200001A3344112287009339000000002001000000000000" +
+                        "0200001A3344112201010102030405060E06112233445566"
+        // payload len > 32 -> pass
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(longNsPkt),
+                PASSED_IPV6_NS_MULTIPLE_OPTIONS
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:4444:5555")
+        // icmp6_opt = ICMPv6NDOptSrcLLAddr(lladdr="01:02:03:04:05:06")
+        // pkt = eth/ip6/icmp6/icmp6_opt
+        val otherHostNsPkt = "02030405060700010203040586DD6000000000203AFF200100000000000002000" +
+                             "01A1122334420010000000000000200001A334411228700E5E000000000200100" +
+                             "00000000000200001A444455550101010203040506"
+        // target ip is not one of device's ip -> drop
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(otherHostNsPkt),
+                DROPPED_IPV6_NS_OTHER_HOST
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=20)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122")
+        // icmp6_opt = ICMPv6NDOptSrcLLAddr(lladdr="01:02:03:04:05:06")
+        // pkt = eth/ip6/icmp6/icmp6_opt
+        val invalidHoplimitNsPkt = "02030405060700010203040586DD6000000000203A14200100000000000" +
+                                   "00200001A1122334420010000000000000200001A3344112287003B1400" +
+                                   "00000020010000000000000200001A334411220101010203040506"
+        // hoplimit is not 255 -> drop
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(invalidHoplimitNsPkt),
+                DROPPED_IPV6_NS_INVALID
+        )
+
+        // Using scapy to generate IPv6 NS packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
+        // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
+        // icmp6 = ICMPv6ND_NS(tgt="2001::200:1a:3344:1122", code=5)
+        // icmp6_opt = ICMPv6NDOptSrcLLAddr(lladdr="01:02:03:04:05:06")
+        // pkt = eth/ip6/icmp6/icmp6_opt
+        val invalidIcmpCodeNsPkt = "02030405060700010203040586DD6000000000203AFF200100000000000" +
+                                   "00200001A1122334420010000000000000200001A3344112287053B0F00" +
+                                   "00000020010000000000000200001A334411220101010203040506"
+        // icmp6 code is not 0 -> drop
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                HexDump.hexStringToByteArray(invalidIcmpCodeNsPkt),
+                DROPPED_IPV6_NS_INVALID
+        )
+
         apfFilter.shutdown()
     }
 
     @Test
     fun testApfProgramUpdate() {
-        val ipClientCallback = ApfTestUtils.MockIpClientCallback()
-        val apfFilter = TestApfFilter(
-            context,
-            getDefaultConfig(),
-            ipClientCallback,
-            metrics,
-            dependencies
+        val apfFilter =
+            ApfFilter(
+                context,
+                getDefaultConfig(),
+                ifParams,
+                ipClientCallback,
+                metrics,
+                dependencies
         )
 
-        val lp = LinkProperties()
-
+        verify(ipClientCallback, times(2)).installPacketFilter(any())
         // add IPv4 address, expect to have apf program update
-        ipClientCallback.resetApfProgramWait()
+        val lp = LinkProperties()
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        ipClientCallback.assertProgramUpdateAndGet()
+        verify(ipClientCallback, times(3)).installPacketFilter(any())
 
         // add the same IPv4 address, expect to have no apf program update
-        ipClientCallback.resetApfProgramWait()
         apfFilter.setLinkProperties(lp)
-        ipClientCallback.assertNoProgramUpdate()
+        verify(ipClientCallback, times(3)).installPacketFilter(any())
 
         // add IPv6 addresses, expect to have apf program update
-        ipClientCallback.resetApfProgramWait()
-        for (addr in hostIpv6AddressList) {
-            lp.addLinkAddress(LinkAddress(addr, 64))
+        for (addr in hostIpv6Addresses) {
+            lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
 
         apfFilter.setLinkProperties(lp)
-        ipClientCallback.assertProgramUpdateAndGet()
+        verify(ipClientCallback, times(4)).installPacketFilter(any())
 
         // add the same IPv6 addresses, expect to have no apf program update
-        ipClientCallback.resetApfProgramWait()
         apfFilter.setLinkProperties(lp)
-        ipClientCallback.assertNoProgramUpdate()
+        verify(ipClientCallback, times(4)).installPacketFilter(any())
+
+        // add more tentative IPv6 addresses, expect to have apf program update
+        for (addr in hostIpv6TentativeAddresses) {
+            lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64, IFA_F_TENTATIVE, 0))
+        }
+
+        apfFilter.setLinkProperties(lp)
+        verify(ipClientCallback, times(5)).installPacketFilter(any())
+
+        // add the same IPv6 addresses, expect to have no apf program update
+        apfFilter.setLinkProperties(lp)
+        verify(ipClientCallback, times(5)).installPacketFilter(any())
+        apfFilter.shutdown()
+    }
+
+    private fun verifyProgramRun(
+            version: Int,
+            program: ByteArray,
+            pkt: ByteArray,
+            targetCnt: Counter,
+            cntMap: MutableMap<Counter, Long> = mutableMapOf(),
+            dataRegion: ByteArray = ByteArray(Counter.totalSize()) { 0 },
+            incTotal: Boolean = true,
+            result: Int = if (targetCnt.name.startsWith("PASSED")) PASS else DROP
+    ) {
+        assertVerdict(version, result, program, pkt, dataRegion)
+        cntMap[targetCnt] = cntMap.getOrDefault(targetCnt, 0) + 1
+        if (incTotal) {
+            cntMap[TOTAL_PACKETS] = cntMap.getOrDefault(TOTAL_PACKETS, 0) + 1
+        }
+        val errMsg = "Counter is not increased properly. To debug: \n" +
+                     " apf_run --program ${HexDump.toHexString(program)} " +
+                     "--packet ${HexDump.toHexString(pkt)} " +
+                     "--data ${HexDump.toHexString(dataRegion)} --age 0 " +
+                     "${if (version == APF_VERSION_6) "--v6" else "" } --trace  | less \n"
+        assertEquals(cntMap, decodeCountersIntoMap(dataRegion), errMsg)
     }
 
     private fun decodeCountersIntoMap(counterBytes: ByteArray): Map<Counter, Long> {
@@ -1765,19 +2361,14 @@ class ApfNewTest {
         return this.drop(7).toByteArray()
     }
 
-    private fun getDefaultConfig(): ApfFilter.ApfConfiguration {
+    private fun getDefaultConfig(apfVersion: Int = APF_VERSION_6): ApfFilter.ApfConfiguration {
         val config = ApfFilter.ApfConfiguration()
         config.apfCapabilities =
-                ApfCapabilities(APF_VERSION_6, 4096, ARPHRD_ETHER)
+                ApfCapabilities(apfVersion, 4096, ARPHRD_ETHER)
         config.multicastFilter = false
         config.ieee802_3Filter = false
         config.ethTypeBlackList = IntArray(0)
+        config.shouldHandleArpOffload = true
         return config
-    }
-
-    companion object {
-        const val ETH_HLEN = 14
-        const val IPV4_HLEN = 20
-        const val IPPROTO_UDP = 17
     }
 }

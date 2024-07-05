@@ -226,6 +226,13 @@ public class NetworkStackUtils {
             "ip_reachability_ignore_organic_nud_failure_version";
 
     /**
+     * Experiment flag to ignore all NUD failures from the neighbor that has never ever entered the
+     * reachable state.
+     */
+    public static final String IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION =
+            "ip_reachability_ignore_never_reachable_neighbor_version";
+
+    /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
      */
     public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
@@ -292,6 +299,12 @@ public class NetworkStackUtils {
      */
     public static final String IGNORE_TCP_INFO_FOR_BLOCKED_UIDS =
             "ignore_tcp_info_for_blocked_uids";
+
+    /**
+     * Kill switch flag to disable the feature of handle arp offload in Apf.
+     */
+    public static final String APF_HANDLE_ARP_OFFLOAD_FORCE_DISABLE =
+            "apf_handle_arp_offload_force_disable";
 
     static {
         System.loadLibrary("networkstackutilsjni");
